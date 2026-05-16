@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+
+# Environment
+.env
+
+# Runtime data (state.json, bookings.jsonl, golfbot.log)
+/data/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Pytest / Ruff / coverage
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/

@@ -1,0 +1,98 @@
+{
+  "ttResults": {
+    "startIndex": 0,
+    "teeTimes": [
+      {
+        "facility": {
+          "facilityId": 888,
+          "name": "Riverside Golf Course",
+          "seoFriendlyName": "888-riverside-golf-course"
+        },
+        "teeTimeRates": [
+          {
+            "holeCount": 18,
+            "teeTimeRateId": 65232384,
+            "playerRule": "Any",
+            "greensFees": {"value": 45.0, "currencyCode": "USD"},
+            "rateName": "18 Holes",
+            "isEighteen": true,
+            "isNine": false,
+            "detailUrl": "/tee-times/facility/888/tee-time/65232384",
+            "isCartIncluded": true
+          }
+        ],
+        "playerRule": "Any",
+        "time": {
+          "date": "2026-05-21T07:10:00+00:00",
+          "formatted": "7:10",
+          "formattedTimeMeridian": "AM"
+        },
+        "detailUrl": "/tee-times/facility/888/tee-time/65232384",
+        "facilityId": 888,
+        "timeHour": 7,
+        "teeTimesPerFacility": 8
+      },
+      {
+        "facility": {
+          "facilityId": 888,
+          "name": "Riverside Golf Course",
+          "seoFriendlyName": "888-riverside-golf-course"
+        },
+        "teeTimeRates": [
+          {
+            "holeCount": 18,
+            "teeTimeRateId": 65232373,
+            "playerRule": "Any",
+            "greensFees": {"value": 45.0, "currencyCode": "USD"},
+            "rateName": "18 Holes",
+            "isEighteen": true,
+            "isNine": false,
+            "detailUrl": "/tee-times/facility/888/tee-time/65232373",
+            "isCartIncluded": true
+          }
+        ],
+        "playerRule": "Any",
+        "time": {
+          "date": "2026-05-21T09:00:00+00:00",
+          "formatted": "9:00",
+          "formattedTimeMeridian": "AM"
+        },
+        "detailUrl": "/tee-times/facility/888/tee-time/65232373",
+        "facilityId": 888,
+        "timeHour": 9,
+        "teeTimesPerFacility": 8
+      },
+      {
+        "facility": {
+          "facilityId": 888,
+          "name": "Riverside Golf Course",
+          "seoFriendlyName": "888-riverside-golf-course"
+        },
+        "teeTimeRates": [
+          {
+            "holeCount": 9,
+            "teeTimeRateId": 99999999,
+            "playerRule": "Any",
+            "greensFees": {"value": 28.0, "currencyCode": "USD"},
+            "rateName": "9 Holes",
+            "isEighteen": false,
+            "isNine": true,
+            "detailUrl": "/tee-times/facility/888/tee-time/99999999",
+            "isCartIncluded": true
+          }
+        ],
+        "playerRule": "Any",
+        "time": {
+          "date": "2026-05-21T12:00:00+00:00",
+          "formatted": "12:00",
+          "formattedTimeMeridian": "PM"
+        },
+        "detailUrl": "/tee-times/facility/888/tee-time/99999999",
+        "facilityId": 888,
+        "timeHour": 12,
+        "teeTimesPerFacility": 8
+      }
+    ],
+    "total": 3
+  }
+}

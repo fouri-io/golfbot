@@ -1,0 +1,46 @@
+timezone: America/Chicago
+
+search:
+  horizon_days: 7
+  start_offset_days: 1
+  days_of_week: [monday, tuesday, wednesday, thursday, friday]
+  holes: 18
+  default_players: 3
+  expanded_players: 2   # used when exactly one member is marked out for a date
+
+time_windows:
+  ideal:      { start: "07:30", end: "08:00" }
+  acceptable: { start: "07:00", end: "09:00" }
+
+courses:
+  # Austin city muni courses — full availability via GolfATX/WebTrac.
+  - { key: jimmy_clay,      display: "Jimmy Clay",      tier: 1, provider: golfatx, provider_id: 1 }
+  - { key: roy_kizer,       display: "Roy Kizer",       tier: 1, provider: golfatx, provider_id: 2 }
+  - { key: morris_williams, display: "Morris Williams", tier: 2, provider: golfatx, provider_id: 3 }
+  - { key: lions,           display: "Lions",           tier: 2, provider: golfatx, provider_id: 4 }
+
+  # Private / semi-private courses — GolfNow.
+  - { key: riverside,            display: "Riverside",            tier: 1, provider: golfnow, provider_id: 888 }
+  - { key: grey_rock_golf_club,  display: "Grey Rock Golf Club",  tier: 1, provider: golfnow, provider_id: 166 }
+  - { key: golf-club-star-ranch, display: "The Golf Club at Star Ranch", tier: 1, provider: golfnow, provider_id: 151 }
+  - { key: falconhead_golf_club, display: "Falconhead Golf Club", tier: 2, provider: golfnow, provider_id: 321 }
+  - { key: avery_ranch_golf_club, display: "Avery Ranch Golf Club", tier: 2, provider: golfnow, provider_id: 206 }
+
+grading:
+  notify_min_grade: B
+
+polling:
+  default_interval_minutes: 60
+  jitter_minutes: 5
+  hammer_windows: []
+
+group:
+  admin: Colby
+  members:
+    - { name: Colby, telegram_user_id: 8970212408 }
+    - { name: Steve, telegram_user_id: 0 }
+    - { name: Ed,    telegram_user_id: 0 }
+
+telegram:
+  bot_token_env: TELEGRAM_BOT_TOKEN
+  chat_id_env:   TELEGRAM_CHAT_ID
