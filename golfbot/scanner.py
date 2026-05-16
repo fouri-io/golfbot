@@ -170,6 +170,7 @@ async def scan_and_notify(
                 bookings=bookings,
             )
             last_scan["telegram_message_id"] = msg_id
+            state["last_digest_at"] = now.isoformat()
             log.info(
                 "scan: sent digest (%d match(es), message_id=%s)",
                 len(matches), msg_id,

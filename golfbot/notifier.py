@@ -41,6 +41,22 @@ def _fmt_clock(dt: datetime) -> str:
     return _fmt_time(dt.time())
 
 
+def _humanize_delta(delta_seconds: int) -> str:
+    """e.g. 'just now', '5m ago' (when given positive delta from past),
+    or 'in 55m' (when given negative delta to a future event)."""
+    if -60 < delta_seconds < 60:
+        return "just now"
+    is_past = delta_seconds > 0
+    sec = abs(delta_seconds)
+    mins = sec // 60
+    if mins < 60:
+        body = f"{mins}m"
+    else:
+        hours, rem = divmod(mins, 60)
+        body = f"{hours}h" if rem == 0 else f"{hours}h {rem}m"
+    return f"{body} ago" if is_past else f"in {body}"
+
+
 # --------------------------------------------------------------------------- #
 # Pure renderers                                                              #
 # --------------------------------------------------------------------------- #
@@ -128,6 +144,15 @@ def render_status(state: dict, cfg: Config, today: date) -> str:
     booking_summary = _bookings_summary(bookings) if bookings else _active_booking_summary(state)
     paused = bool(state.get("paused"))
 
+    now = datetime.now(cfg.tz)
+    last_scan_line = _stamp_line(
+        "🔁 Last scan", state.get("last_poll_at"), now,
+    )
+    last_digest_line = _stamp_line(
+        "📨 Last digest", state.get("last_digest_at"), now,
+        empty="— (none yet)",
+    )
+
     return "\n".join([
         f"📡 Watching: {course_names}",
         f"🗓  Horizon: {_fmt_date(start)} → {_fmt_date(end)} ({cfg.search.horizon_days} days)",
@@ -135,8 +160,23 @@ def render_status(state: dict, cfg: Config, today: date) -> str:
         f"⏰ Ideal: {_fmt_time(ideal.start)}–{_fmt_time(ideal.end)}"
         f" · Acceptable: {_fmt_time(accept.start)}–{_fmt_time(accept.end)}",
         f"📌 Bookings: {booking_summary}",
+        last_scan_line,
+        last_digest_line,
         f"🔔 Notifications: {'OFF (paused)' if paused else 'ON'}",
     ])
+
+
+def _stamp_line(label: str, iso_value: str | None, now: datetime, empty: str = "— never") -> str:
+    """Format e.g. '🔁 Last scan: 5m ago (12:35 PM)' or '— never' if missing."""
+    if not iso_value:
+        return f"{label}: {empty}"
+    try:
+        when = datetime.fromisoformat(iso_value)
+    except (ValueError, TypeError):
+        return f"{label}: {empty}"
+    delta_seconds = int((now - when).total_seconds())
+    rel = _humanize_delta(delta_seconds)
+    return f"{label}: {rel} ({_fmt_clock(when)})"
 
 
 def _bookings_summary(bookings: dict[date, dict]) -> str:
@@ -450,15 +490,14 @@ def _format_roster(members_in: list[str], members_out: list[str]) -> str:
 
 
 def _render_footer(run_at: datetime, next_run_at: datetime | None) -> str:
+    """Footer: relative time since the scan, relative time to next scan."""
+    now = datetime.now(run_at.tzinfo) if run_at.tzinfo else datetime.now()
+    last = _humanize_delta(int((now - run_at).total_seconds()))
     if next_run_at:
-        delta = next_run_at - run_at
-        mins = max(0, int(delta.total_seconds() // 60))
-        if mins >= 60:
-            human = f"~{mins // 60}h"
-        else:
-            human = f"~{mins}m"
-        return f"<i>Next scan: {human}</i>  ·  /tee · /pause · /help"
-    return "<i>Updated just now</i>  ·  /tee · /pause · /help"
+        next_delta = int((now - next_run_at).total_seconds())
+        nxt = _humanize_delta(next_delta)
+        return f"<i>Last scan: {last} · Next: {nxt}</i>  ·  /tee · /pause · /help"
+    return f"<i>Last scan: {last}</i>  ·  /tee · /pause · /help"
 
 
 async def send_digest(

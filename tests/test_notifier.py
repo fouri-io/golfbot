@@ -381,7 +381,8 @@ def test_render_digest_next_run_footer():
     out = render_digest(
         [], datetime(2026, 5, 16, 11, 30), datetime(2026, 5, 16, 12, 30), cfg,
     )
-    assert "Next scan:" in out
+    assert "Next:" in out
+    assert "Last scan:" in out
 
 
 def test_render_status_paused_and_booked():
