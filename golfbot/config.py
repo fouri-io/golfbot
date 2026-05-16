@@ -74,11 +74,32 @@ class Grading(BaseModel):
     notify_min_grade: Grade
 
 
+class ActiveWindow(BaseModel):
+    """Time-of-day range during which the scheduled scan fires.
+
+    Scans outside this window are silently skipped. /scan can override
+    via force=True so the admin can scan whenever.
+    """
+    start: time
+    end: time
+
+    @model_validator(mode="after")
+    def _check_order(self) -> ActiveWindow:
+        if self.start >= self.end:
+            raise ValueError(
+                f"active_window start ({self.start}) must be before end ({self.end})"
+            )
+        return self
+
+
 class Polling(BaseModel):
     default_interval_minutes: int = Field(ge=1)
     jitter_minutes: int = Field(ge=0)
     # Shape of a hammer window is TBD (per SPEC); permissive for now.
     hammer_windows: list[dict] = Field(default_factory=list)
+    # When set, scheduled scans only fire during this time-of-day window.
+    # None = 24/7. /scan always works regardless.
+    active_window: ActiveWindow | None = None
 
 
 class Member(BaseModel):
@@ -89,7 +110,10 @@ class Member(BaseModel):
 class Group(BaseModel):
     admin: str
     members: list[Member] = Field(min_length=1)
-    admin_required: bool = True   # skip dates when admin is out
+    # When True: skip dates entirely when admin is out.
+    # When False (default): scan any date where ≥1 registered member is available,
+    # and the scanner uses that count as min_players for the search.
+    admin_required: bool = False
 
     @model_validator(mode="after")
     def _admin_in_members(self) -> Group:

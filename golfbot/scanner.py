@@ -150,6 +150,7 @@ async def scan_and_notify(
     bot: Bot,
     chat_id: int,
     next_run_at: datetime | None = None,
+    force: bool = False,
 ) -> dict[str, Any]:
     """Scheduled-run entrypoint. Polls, dedups vs last scan, sends digest
     if changed. Returns the new last_scan dict for inspection/tests.
@@ -160,6 +161,20 @@ async def scan_and_notify(
     on top of the cached raw slots.
     """
     now = datetime.now(cfg.tz)
+
+    # Respect quiet hours unless the caller explicitly forced (e.g. /scan).
+    if not force and cfg.polling.active_window is not None:
+        win = cfg.polling.active_window
+        current = now.time()
+        if not (win.start <= current < win.end):
+            log.info(
+                "scan: outside active window %s-%s; skipping",
+                win.start.strftime("%H:%M"), win.end.strftime("%H:%M"),
+            )
+            return (
+                store.load_state(state_path).get("last_scan") or {}
+            )
+
     today = now.date()
     start, end = current_window(
         today=today,

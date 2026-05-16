@@ -128,10 +128,17 @@ def date_should_be_scanned(
 ) -> bool:
     """The gate: should we even hit providers for this date?
 
-    Today's rule: skip if admin is out AND admin_required is set.
-    Future: extend per non-admin members' rules if/when configurable.
+    Rules:
+      - If `group.admin_required` is True, skip dates when admin is out
+        (admin-centric mode — preserved for users who want it).
+      - Otherwise, scan any date where at least one registered member is
+        available. Days when everyone is out get skipped.
+      - If there are no registered members at all (fresh install), scan
+        every date — no constraints to apply.
     """
     if cfg.group.admin_required and not admin_available_on(on_date, cfg, availability):
+        return False
+    if registered_members(cfg) and not available_members_on(on_date, cfg, availability):
         return False
     return True
 

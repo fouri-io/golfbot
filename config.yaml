@@ -33,6 +33,9 @@ polling:
   default_interval_minutes: 60
   jitter_minutes: 5
   hammer_windows: []
+  # Scheduled scans only fire during this window (local time). /scan still
+  # works at any time. Comment out for 24-hour operation.
+  active_window: { start: "08:00", end: "20:00" }
 
 group:
   admin: Colby

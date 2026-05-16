@@ -153,17 +153,27 @@ def render_status(state: dict, cfg: Config, today: date) -> str:
         empty="— (none yet)",
     )
 
-    return "\n".join([
+    lines = [
         f"📡 Watching: {course_names}",
         f"🗓  Horizon: {_fmt_date(start)} → {_fmt_date(end)} ({cfg.search.horizon_days} days)",
         f"🎯 Days: {days}",
         f"⏰ Ideal: {_fmt_time(ideal.start)}–{_fmt_time(ideal.end)}"
         f" · Acceptable: {_fmt_time(accept.start)}–{_fmt_time(accept.end)}",
         f"📌 Bookings: {booking_summary}",
-        last_scan_line,
-        last_digest_line,
-        f"🔔 Notifications: {'OFF (paused)' if paused else 'ON'}",
-    ])
+    ]
+    aw = cfg.polling.active_window
+    if aw is not None:
+        cur = now.time()
+        in_window = aw.start <= cur < aw.end
+        win_str = f"{_fmt_time(aw.start)}–{_fmt_time(aw.end)}"
+        if in_window:
+            lines.append(f"☀️ Active hours: {win_str} (in window)")
+        else:
+            lines.append(f"🌙 Quiet hours: outside {win_str} — scheduled scans paused")
+    lines.append(last_scan_line)
+    lines.append(last_digest_line)
+    lines.append(f"🔔 Notifications: {'OFF (paused)' if paused else 'ON'}")
+    return "\n".join(lines)
 
 
 _FULL_MAX_TIMES_PER_COURSE = 10

@@ -101,11 +101,12 @@ def _cmd_run() -> int:
     async def post_init(app):
         scheduler = AsyncIOScheduler(timezone=cfg.tz)
 
-        async def _job():
+        async def _job(force: bool = False):
             job = scheduler.get_job("scan")
             next_run = job.next_run_time if job else None
             logging.getLogger("golfbot.scheduler").info(
-                "scan job firing (next fire after this: %s)", next_run,
+                "scan job firing (force=%s, next fire after this: %s)",
+                force, next_run,
             )
             await scanner.scan_and_notify(
                 cfg=cfg,
@@ -114,6 +115,7 @@ def _cmd_run() -> int:
                 bot=app.bot,
                 chat_id=chat_id,
                 next_run_at=next_run,
+                force=force,
             )
 
         # Skip the immediate startup scan if we just scanned recently —

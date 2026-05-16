@@ -655,7 +655,7 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     await update.message.reply_text("🔄 Scanning now…")
     try:
-        await scan_job()
+        await scan_job(force=True)
     except Exception as e:
         await update.message.reply_text(f"Scan failed: {e}")
         return

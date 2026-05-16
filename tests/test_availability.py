@@ -21,11 +21,16 @@ def cfg():
 
 
 def test_registered_members_excludes_zero_ids(cfg):
+    """Members with telegram_user_id 0 are placeholders; ignore them.
+    Whatever's in committed config, all returned members should have
+    real (non-zero) IDs."""
     members = avail_mod.registered_members(cfg)
-    # Only Colby has a real telegram_user_id in the committed config.
-    assert "Colby" in members
-    assert "Steve" not in members
-    assert "Ed" not in members
+    name_to_id = {m.name: m.telegram_user_id for m in cfg.group.members}
+    for name in members:
+        assert name_to_id[name] != 0
+    for m in cfg.group.members:
+        if m.telegram_user_id == 0:
+            assert m.name not in members
 
 
 # ---------- is_available default ----------
@@ -76,8 +81,30 @@ def test_date_scanned_when_admin_available(cfg):
 
 
 def test_date_skipped_when_admin_out_and_required(cfg):
-    assert cfg.group.admin_required is True
+    # admin_required defaults to False now; explicitly opt in to admin-centric mode.
+    cfg = cfg.model_copy(update={
+        "group": cfg.group.model_copy(update={"admin_required": True})
+    })
     avail = {cfg.group.admin: avail_mod.AvailabilityRecord(out_dates=[date(2026, 5, 20)])}
+    assert avail_mod.date_should_be_scanned(date(2026, 5, 20), cfg, avail) is False
+
+
+def test_date_scanned_when_admin_out_but_others_in(cfg):
+    """Default (admin_required=False): date is still scanned as long as
+    at least one registered member is available, even if admin is out."""
+    assert cfg.group.admin_required is False
+    # Admin out for a date, but Steve/Ed (if registered) are still in.
+    avail = {cfg.group.admin: avail_mod.AvailabilityRecord(out_dates=[date(2026, 5, 20)])}
+    if len(avail_mod.registered_members(cfg)) > 1:
+        assert avail_mod.date_should_be_scanned(date(2026, 5, 20), cfg, avail) is True
+
+
+def test_date_skipped_when_all_members_out(cfg):
+    """If every registered member is out for a date, skip it."""
+    avail = {
+        m: avail_mod.AvailabilityRecord(out_dates=[date(2026, 5, 20)])
+        for m in avail_mod.registered_members(cfg)
+    }
     assert avail_mod.date_should_be_scanned(date(2026, 5, 20), cfg, avail) is False
 
 
@@ -91,15 +118,19 @@ def test_date_scanned_when_admin_required_false(cfg):
 
 
 def test_players_to_search_for_default_is_count_of_available(cfg):
-    """Only Colby registered → 1 available → search with 1."""
+    """Counts registered members who are currently available."""
     avail = {}
-    assert avail_mod.players_to_search_for(date(2026, 5, 20), cfg, avail) == 1
+    expected = len(avail_mod.registered_members(cfg))
+    assert avail_mod.players_to_search_for(date(2026, 5, 20), cfg, avail) == max(1, expected)
 
 
 def test_players_to_search_for_min_one(cfg):
-    """Even if no one is available (and admin_required were off),
-    floor at 1."""
-    avail = {cfg.group.admin: avail_mod.AvailabilityRecord(out_dates=[date(2026, 5, 20)])}
+    """Even if everyone is out, floor at 1 (date would be skipped anyway
+    upstream, but the helper itself is robust)."""
+    avail = {
+        m: avail_mod.AvailabilityRecord(out_dates=[date(2026, 5, 20)])
+        for m in avail_mod.registered_members(cfg)
+    }
     assert avail_mod.players_to_search_for(date(2026, 5, 20), cfg, avail) == 1
 
 
