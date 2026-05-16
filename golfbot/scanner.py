@@ -33,52 +33,97 @@ from golfbot.providers.base import Provider, RawSlot
 log = logging.getLogger(__name__)
 
 
-async def run_scan(
+async def run_full_scan(
     cfg: Config,
     providers: dict[str, Provider],
     dates: list[date],
-    availability: dict[str, avail_mod.AvailabilityRecord] | None = None,
-    fallback_min_players: int = 1,
-) -> list[Match]:
-    """Run providers + pipeline. Returns Policy-B-filtered matches annotated
-    with per-date roster.
+    min_players: int = 2,
+) -> list[RawSlot]:
+    """Fetch raw slots across all configured courses + dates with no filters.
 
-    Per date the scanner consults `availability` to decide:
-      - Skip the date if admin is out (and `cfg.group.admin_required`).
-      - Otherwise query providers with `players_to_search_for(date)`.
-
-    `availability` may be None — in that case every date is scanned with
-    `fallback_min_players` (used by `scrape --raw` and tests that don't
-    care about availability).
+    Used by the `/full` Telegram command — caller renders the output
+    directly without going through grading / Policy B / availability gates.
     """
     by_provider: dict[str, list] = {}
     for c in cfg.courses:
         by_provider.setdefault(c.provider, []).append(c)
-
-    # Decide per-date queries.
-    scan_plan: list[tuple[date, int]] = []
-    for d in dates:
-        if availability is None:
-            scan_plan.append((d, fallback_min_players))
-            continue
-        if not avail_mod.date_should_be_scanned(d, cfg, availability):
-            log.info("scan: admin out for %s — skipping date", d)
-            continue
-        n = avail_mod.players_to_search_for(d, cfg, availability)
-        scan_plan.append((d, n))
 
     raw: list[RawSlot] = []
     for provider_name, courses in by_provider.items():
         prov = providers.get(provider_name)
         if prov is None:
             log.warning(
-                "scanner: provider %r not registered — skipping %d course(s)",
+                "run_full_scan: provider %r not registered — skipping %d course(s)",
                 provider_name, len(courses),
             )
             continue
-        for d, min_players in scan_plan:
+        for d in dates:
             slots = await prov.fetch_slots(courses, d, min_players)
             raw.extend(slots)
+    return raw
+
+
+async def run_scan(
+    cfg: Config,
+    providers: dict[str, Provider],
+    dates: list[date],
+    availability: dict[str, avail_mod.AvailabilityRecord] | None = None,
+    fallback_min_players: int = 1,
+    prefetched: list[RawSlot] | None = None,
+) -> list[Match]:
+    """Run providers + pipeline. Returns Policy-B-filtered matches annotated
+    with per-date roster.
+
+    Per date the scanner consults `availability` to decide:
+      - Skip the date if admin is out (and `cfg.group.admin_required`).
+      - Otherwise filter slots to those with `players_available >=` the
+        count of available registered members.
+
+    `prefetched` lets the caller pass in already-fetched RawSlots (used by
+    `scan_and_notify` which caches the raw scan to make /full free).
+    When None, this fetches fresh.
+    """
+    if prefetched is not None:
+        raw: list[RawSlot] = list(prefetched)
+    else:
+        by_provider: dict[str, list] = {}
+        for c in cfg.courses:
+            by_provider.setdefault(c.provider, []).append(c)
+
+        # Decide per-date queries.
+        scan_plan: list[tuple[date, int]] = []
+        for d in dates:
+            if availability is None:
+                scan_plan.append((d, fallback_min_players))
+                continue
+            if not avail_mod.date_should_be_scanned(d, cfg, availability):
+                log.info("scan: admin out for %s — skipping date", d)
+                continue
+            n = avail_mod.players_to_search_for(d, cfg, availability)
+            scan_plan.append((d, n))
+
+        raw = []
+        for provider_name, courses in by_provider.items():
+            prov = providers.get(provider_name)
+            if prov is None:
+                log.warning(
+                    "scanner: provider %r not registered — skipping %d course(s)",
+                    provider_name, len(courses),
+                )
+                continue
+            for d, min_players in scan_plan:
+                slots = await prov.fetch_slots(courses, d, min_players)
+                raw.extend(slots)
+
+    # Apply availability filters client-side. When using `prefetched`,
+    # raw may include dates where admin is out; drop those here.
+    if availability is not None:
+        raw = [s for s in raw if avail_mod.date_should_be_scanned(s.tee_date, cfg, availability)]
+        # Also: require slot.players_available >= group size needed
+        raw = [
+            s for s in raw
+            if s.players_available >= avail_mod.players_to_search_for(s.tee_date, cfg, availability)
+        ]
 
     graded = filter_and_grade(raw, cfg)
     best = apply_policy_b(graded)
@@ -108,6 +153,11 @@ async def scan_and_notify(
 ) -> dict[str, Any]:
     """Scheduled-run entrypoint. Polls, dedups vs last scan, sends digest
     if changed. Returns the new last_scan dict for inspection/tests.
+
+    Fetches RAW slots for every date in horizon (no per-fetch availability
+    skip) and caches them in state.last_scan.raw_slots. This makes /full
+    free of fresh API calls. Filtering for the digest happens client-side
+    on top of the cached raw slots.
     """
     now = datetime.now(cfg.tz)
     today = now.date()
@@ -123,14 +173,25 @@ async def scan_and_notify(
         dates.append(d)
         d = d + timedelta(days=1)
 
-    availability = avail_mod.load_availability(store.load_state(state_path))
+    state = store.load_state(state_path)
+    availability = avail_mod.load_availability(state)
     log.info(
         "scan: %d course(s) x %d date(s), %d registered member(s)",
         len(cfg.courses), len(dates), len(avail_mod.registered_members(cfg)),
     )
-    matches = await run_scan(cfg, providers, dates, availability=availability)
 
-    state = store.load_state(state_path)
+    # Fetch raw slots for every date in horizon. We always use the lowest
+    # practical min_players so /full has full coverage; per-date roster
+    # filtering happens client-side below.
+    raw_slots = await run_full_scan(cfg, providers, dates, min_players=2)
+    raw_dicts = [s.to_dict() for s in raw_slots]
+
+    # Now apply the filter pipeline on top of the raw cache.
+    matches = await run_scan(
+        cfg, providers, dates, availability=availability,
+        prefetched=raw_slots,
+    )
+
     state["last_poll_at"] = now.isoformat()
     paused = bool(state.get("paused"))
 
@@ -139,8 +200,10 @@ async def scan_and_notify(
     prev_dicts = (state.get("last_scan") or {}).get("matches", [])
     if _signature(current_dicts) == _signature(prev_dicts):
         log.info("scan: no change since previous scan (%d match(es))", len(matches))
-        # Still update last_poll_at so /status reflects fresh activity.
-        state.setdefault("last_scan", {})["run_at"] = now.isoformat()
+        # Update run_at + raw cache so /full and /status reflect fresh activity.
+        existing_scan = state.setdefault("last_scan", {})
+        existing_scan["run_at"] = now.isoformat()
+        existing_scan["raw_slots"] = raw_dicts
         await store.save_state(state_path, state)
         return state["last_scan"]
 
@@ -148,6 +211,7 @@ async def scan_and_notify(
     last_scan: dict[str, Any] = {
         "run_at": now.isoformat(),
         "matches": current_dicts,
+        "raw_slots": raw_dicts,
         "next_run_at": next_run_at.isoformat() if next_run_at else None,
         "telegram_message_id": None,
     }

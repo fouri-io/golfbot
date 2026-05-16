@@ -101,6 +101,7 @@ def build_app(
     app.add_handler(CommandHandler("out", cmd_out))
     app.add_handler(CommandHandler("in", cmd_in))
     app.add_handler(CommandHandler("scan", cmd_scan))
+    app.add_handler(CommandHandler("full", cmd_full))
     app.add_handler(CommandHandler("pause", cmd_pause))
     app.add_handler(CommandHandler("resume", cmd_resume))
     app.add_handler(CommandHandler("unbook", cmd_unbook))
@@ -131,8 +132,9 @@ _HELP_TEXT = (
     "golfbot commands:\n"
     "\n"
     "Tee times\n"
-    "/tee       — last scan's matches + bookings\n"
-    "/scan      — trigger a fresh scan now (admin)\n"
+    "/tee       — last scan's filtered matches + bookings\n"
+    "/full      — every slot in horizon, no filters (admin, slow)\n"
+    "/scan      — trigger a fresh filtered scan now (admin)\n"
     "  In the digest, tap ✓ #N to confirm a booking (after booking externally),\n"
     "  and tap ↩️ Cancel to undo it.\n"
     "\n"
@@ -545,6 +547,93 @@ async def cmd_courses(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     for c in ctx.cfg.courses:
         lines.append(f"• {c.display} (tier {c.tier})")
     await update.message.reply_text("\n".join(lines))
+
+
+async def cmd_full(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin-only: show every available 18-hole slot in horizon, no filters.
+
+    Reads from the cached raw slots stored on the last scheduled scan, so
+    no fresh API calls are made. Falls back to a live fetch only when the
+    cache is missing (first run, or after a state.json wipe).
+    """
+    from telegram.constants import ParseMode
+
+    from golfbot import notifier as _notifier
+    from golfbot.providers.base import RawSlot
+
+    if update.message is None or update.effective_user is None:
+        return
+    ctx = _ctx(context)
+    if not ctx.is_admin(update.effective_user.id):
+        await update.message.reply_text("Admin only.")
+        return
+
+    state = store.load_state(ctx.state_path)
+    last = state.get("last_scan") or {}
+    raw_dicts = last.get("raw_slots")
+
+    if raw_dicts:
+        run_at_iso = last.get("run_at")
+        from datetime import datetime as _dt
+        run_at = _dt.fromisoformat(run_at_iso) if run_at_iso else ctx.now()
+        slots = [RawSlot.from_dict(d) for d in raw_dicts]
+        text = _notifier.render_full_listing(slots, ctx.cfg, run_at)
+        await update.message.reply_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True,
+        )
+        return
+
+    # No cache yet — fall back to a fresh fetch (one-time cost; the next
+    # scheduled scan populates the cache for future /full calls).
+    from datetime import timedelta as _timedelta
+
+    from golfbot import scanner as _scanner
+    from golfbot.availability import _DAY_INDEX
+    from golfbot.horizon import current_window
+
+    providers = context.application.bot_data.get("providers")
+    if providers is None:
+        await update.message.reply_text(
+            "Providers aren't initialized. Are you on `golfbot run`?"
+        )
+        return
+
+    placeholder = await update.message.reply_text(
+        "🔄 No cached scan yet — fetching now, ~30-60s. Future /full calls "
+        "will be instant once the scheduled scan populates the cache."
+    )
+
+    today = ctx.today()
+    start, end = current_window(
+        today=today,
+        start_offset_days=ctx.cfg.search.start_offset_days,
+        horizon_days=ctx.cfg.search.horizon_days,
+        booked_through=None,
+    )
+    days_set = {_DAY_INDEX[name] for name in ctx.cfg.search.days_of_week}
+    dates: list = []
+    d = start
+    while d <= end:
+        if d.weekday() in days_set:
+            dates.append(d)
+        d = d + _timedelta(days=1)
+
+    try:
+        slots = await _scanner.run_full_scan(ctx.cfg, providers, dates, min_players=2)
+    except Exception as e:
+        await placeholder.edit_text(f"Full scan failed: {e}")
+        return
+
+    slots = [s for s in slots if s.holes == 18]
+    text = _notifier.render_full_listing(slots, ctx.cfg, ctx.now())
+    try:
+        await placeholder.edit_text(
+            text, parse_mode=ParseMode.HTML, disable_web_page_preview=True,
+        )
+    except Exception as e:
+        await placeholder.edit_text(f"Failed to render listing: {e}")
 
 
 async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

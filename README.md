@@ -83,18 +83,18 @@ caffeinate -i .venv/bin/golfbot run
 
 **About `caffeinate`** (macOS): a built-in that holds a sleep assertion
 while the wrapped process runs. `-i` prevents *idle sleep*. When you
-Ctrl-C the bot, the assertion releases. Without it, if the system goes
-idle (lid closed counts as idle on MacBook), APScheduler's asyncio loop
-pauses and scheduled scans get missed; with `misfire_grace_time=None`
-they fire on wake, but you'd rather not miss them in the first place.
+Ctrl-C the bot, the assertion releases.
 
-For a Mac mini deployment, you typically don't need `caffeinate` — just
-set "Prevent automatic sleeping when display is off" in System Settings
-→ Battery (or `sudo pmset -a sleep 0`) and run `golfbot run` directly.
+**Use it on every Mac** (laptop or mini). Even on a Mac mini that's
+configured to never sleep at the OS level, wrapping the bot with
+`caffeinate -i` is the defensive default: if pmset config gets reset
+(OS update, factory reset, etc.) the bot keeps its sleep assertion
+process-scoped, so scheduled scans don't silently start dropping.
+Zero CPU cost; no downside.
 
 Lid-close sleep on a MacBook is *separate* from idle sleep and overrides
-`-i`; if you want the bot to keep running with the lid closed, also run
-on AC power and use `caffeinate -is` (or change the relevant pmset).
+`-i`. To keep running with the lid closed, also be on AC power and use
+`caffeinate -is` (or adjust pmset).
 
 Once running, the bot posts a **digest message** to the group whenever the
 match set changes — same shape as `scrape` output, one row per matching

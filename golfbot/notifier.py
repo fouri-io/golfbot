@@ -166,6 +166,84 @@ def render_status(state: dict, cfg: Config, today: date) -> str:
     ])
 
 
+_FULL_MAX_TIMES_PER_COURSE = 10
+_TELEGRAM_TEXT_LIMIT = 4096
+
+
+def render_full_listing(
+    slots: list,    # list[RawSlot]; importing the type would create a cycle
+    cfg: Config,
+    run_at: datetime,
+) -> str:
+    """Render every slot in `slots`, grouped by date then course.
+
+    Each (course, date) cell shows the count + up to
+    `_FULL_MAX_TIMES_PER_COURSE` earliest times. Output is truncated to fit
+    in a single Telegram message (4096-char limit) with a note when cut.
+    """
+    import html as _html
+    from collections import defaultdict
+
+    course_display: dict[str, str] = {c.key: c.display for c in cfg.courses}
+
+    # date -> course_key -> list[RawSlot]
+    by_date: dict = defaultdict(lambda: defaultdict(list))
+    for s in slots:
+        by_date[s.tee_date][s.course_key].append(s)
+
+    header = [
+        f"🏌️ <b>All Slots</b> — {_fmt_clock(run_at)}",
+        f"<i>{len(cfg.courses)} courses · "
+        f"{', '.join(d[:3].capitalize() for d in cfg.search.days_of_week)} · 18-hole</i>",
+        "",
+    ]
+    body_lines: list[str] = []
+    total = 0
+
+    for d in sorted(by_date.keys()):
+        course_slots = by_date[d]
+        day_total = sum(len(ss) for ss in course_slots.values())
+        if day_total == 0:
+            continue
+        total += day_total
+        dow = d.strftime("%a")
+        date_str = f"{d.month}/{d.day}"
+        body_lines.append(f"<b>{dow} {date_str}</b> ({day_total})")
+        for course_key in sorted(
+            course_slots.keys(),
+            key=lambda k: (-len(course_slots[k]), course_display.get(k, k)),
+        ):
+            ss = sorted(course_slots[course_key], key=lambda s: s.tee_time)
+            display = _html.escape(course_display.get(course_key, course_key))
+            shown = [s.tee_time.strftime("%H:%M") for s in ss[:_FULL_MAX_TIMES_PER_COURSE]]
+            extra = len(ss) - len(shown)
+            times_str = ", ".join(shown)
+            if extra > 0:
+                times_str += f"... +{extra} more"
+            body_lines.append(f"  {display} ({len(ss)}): {times_str}")
+        body_lines.append("")
+
+    if total == 0:
+        return "\n".join(header + ["No slots available across configured days."])
+
+    footer = [f"<i>{total} total slots</i>"]
+
+    # Truncate if over Telegram's limit. Drop trailing day groups first.
+    full = "\n".join(header + body_lines + footer)
+    if len(full) <= _TELEGRAM_TEXT_LIMIT:
+        return full
+
+    # Iteratively pop the last day until we fit.
+    while body_lines and len("\n".join(header + body_lines + footer)) > _TELEGRAM_TEXT_LIMIT - 80:
+        # Pop until we hit a date heading (last day's group)
+        while body_lines and not body_lines[-1].startswith("<b>"):
+            body_lines.pop()
+        if body_lines:
+            body_lines.pop()  # the date heading itself
+    footer = [f"<i>{total} total slots — output truncated to fit Telegram limit</i>"]
+    return "\n".join(header + body_lines + footer)
+
+
 def _stamp_line(label: str, iso_value: str | None, now: datetime, empty: str = "— never") -> str:
     """Format e.g. '🔁 Last scan: 5m ago (12:35 PM)' or '— never' if missing."""
     if not iso_value:

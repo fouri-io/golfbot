@@ -34,6 +34,32 @@ class RawSlot:
     price_usd: float | None = None
     extra: dict = field(default_factory=dict)   # provider-specific debug
 
+    def to_dict(self) -> dict:
+        """Serialize for state.json. `extra` is dropped (provider-debug only)."""
+        return {
+            "course_key": self.course_key,
+            "tee_date": self.tee_date.isoformat(),
+            "tee_time": self.tee_time.isoformat(),
+            "players_available": self.players_available,
+            "holes": self.holes,
+            "booking_url": self.booking_url,
+            "provider": self.provider,
+            "price_usd": self.price_usd,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "RawSlot":
+        return cls(
+            course_key=d["course_key"],
+            tee_date=date.fromisoformat(d["tee_date"]),
+            tee_time=time.fromisoformat(d["tee_time"]),
+            players_available=d["players_available"],
+            holes=d["holes"],
+            booking_url=d["booking_url"],
+            provider=d["provider"],
+            price_usd=d.get("price_usd"),
+        )
+
 
 class Provider(Protocol):
     """Stateless coroutine-style provider.

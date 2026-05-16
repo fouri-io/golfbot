@@ -385,6 +385,91 @@ def test_render_digest_next_run_footer():
     assert "Last scan:" in out
 
 
+def test_render_full_listing_basic():
+    from datetime import date as _date
+    from datetime import time as _time
+
+    from golfbot.notifier import render_full_listing
+    from golfbot.providers.base import RawSlot
+
+    cfg = load(REPO_ROOT / "config.yaml")
+    slots = [
+        RawSlot(
+            course_key="roy_kizer",
+            tee_date=_date(2026, 5, 18),
+            tee_time=_time(6, 31),
+            players_available=4,
+            holes=18,
+            booking_url="https://x/1",
+            provider="golfatx",
+            price_usd=None,
+        ),
+        RawSlot(
+            course_key="roy_kizer",
+            tee_date=_date(2026, 5, 18),
+            tee_time=_time(7, 30),
+            players_available=2,
+            holes=18,
+            booking_url="https://x/2",
+            provider="golfatx",
+            price_usd=None,
+        ),
+        RawSlot(
+            course_key="riverside",
+            tee_date=_date(2026, 5, 20),
+            tee_time=_time(14, 30),
+            players_available=4,
+            holes=18,
+            booking_url="https://x/3",
+            provider="golfnow",
+            price_usd=45.0,
+        ),
+    ]
+    out = render_full_listing(slots, cfg, datetime(2026, 5, 16, 12, 30))
+    assert "All Slots" in out
+    assert "Mon 5/18" in out
+    assert "Wed 5/20" in out
+    assert "Roy Kizer (2):" in out  # 2 slots
+    assert "06:31" in out
+    assert "07:30" in out
+    assert "14:30" in out
+    assert "3 total slots" in out
+
+
+def test_render_full_listing_truncates_per_course():
+    from datetime import date as _date
+    from datetime import time as _time
+
+    from golfbot.notifier import render_full_listing
+    from golfbot.providers.base import RawSlot
+
+    cfg = load(REPO_ROOT / "config.yaml")
+    # 15 slots for one course → should show 10 + "+5 more"
+    slots = [
+        RawSlot(
+            course_key="riverside",
+            tee_date=_date(2026, 5, 18),
+            tee_time=_time(7, i),
+            players_available=4,
+            holes=18,
+            booking_url=f"https://x/{i}",
+            provider="golfnow",
+            price_usd=45.0,
+        )
+        for i in range(15)
+    ]
+    out = render_full_listing(slots, cfg, datetime(2026, 5, 16, 12, 30))
+    assert "(15):" in out      # count is 15
+    assert "+5 more" in out    # 15 - 10 shown
+
+
+def test_render_full_listing_empty():
+    from golfbot.notifier import render_full_listing
+    cfg = load(REPO_ROOT / "config.yaml")
+    out = render_full_listing([], cfg, datetime(2026, 5, 16, 12, 30))
+    assert "No slots available" in out
+
+
 def test_render_status_paused_and_booked():
     from golfbot.store import default_state
     cfg = load(REPO_ROOT / "config.yaml")
