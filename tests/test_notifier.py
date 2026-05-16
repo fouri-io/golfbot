@@ -202,7 +202,7 @@ def test_render_status_default(monkeypatch):
     assert "🎯 Days: Mon, Tue, Wed, Thu, Fri" in out
     assert "⏰ Ideal: 7:30 AM–8:00 AM" in out
     assert "Acceptable: 7:00 AM–9:00 AM" in out
-    assert "🎟  Booked: — (none)" in out
+    assert "📌 Bookings: — (none)" in out
     assert "🔔 Notifications: ON" in out
 
 
@@ -242,7 +242,7 @@ def test_render_digest_with_matches():
     )
     assert "🏌️" in out
     assert "11:30 AM" in out
-    assert "2 matches" in out
+    assert "2 available matches" in out
     assert "Roy Kizer" in out
     assert "Riverside" in out
     assert "$45" in out
@@ -274,6 +274,107 @@ def test_render_digest_escapes_html():
     assert "<evil>" not in out
 
 
+def test_render_digest_with_bookings():
+    from golfbot.notifier import render_digest
+    cfg = load(REPO_ROOT / "config.yaml")
+    matches = [
+        {
+            "course_key": "roy_kizer", "course_display": "Roy Kizer",
+            "course_tier": 1, "tee_date": "2026-05-18", "tee_time": "07:30:00",
+            "grade": "A", "players_available": 3, "holes": 18,
+            "booking_url": "https://x/1", "price_usd": None,
+            "provider": "golfatx", "members_in": ["Colby"], "members_out": [],
+        },
+        {
+            "course_key": "riverside", "course_display": "Riverside",
+            "course_tier": 1, "tee_date": "2026-05-20", "tee_time": "07:30:00",
+            "grade": "A", "players_available": 3, "holes": 18,
+            "booking_url": "https://x/2", "price_usd": 45.0,
+            "provider": "golfnow", "members_in": ["Colby"], "members_out": [],
+        },
+    ]
+    bookings = {
+        date(2026, 5, 18): {
+            **matches[0],
+            "booked_at": "2026-05-16T12:00:00",
+            "booked_by": "Colby",
+        }
+    }
+    out = render_digest(matches, datetime(2026, 5, 16, 11, 30), None, cfg, bookings=bookings)
+    # Booking section appears
+    assert "📌 BOOKED" in out
+    # Roy Kizer is in the booked section
+    assert "Roy Kizer" in out
+    # Roy Kizer should NOT appear in "available matches" list
+    available_section = out.split("available match")[1] if "available match" in out else ""
+    assert "Roy Kizer" not in available_section
+    # Riverside should be visible
+    assert "Riverside" in out
+
+
+def test_build_digest_keyboard_confirm_and_cancel():
+    from golfbot.notifier import build_digest_keyboard
+    matches = [
+        {
+            "course_key": "roy_kizer", "course_display": "Roy Kizer",
+            "course_tier": 1, "tee_date": "2026-05-18", "tee_time": "07:30:00",
+            "grade": "A", "players_available": 3, "holes": 18,
+            "booking_url": "https://x/1", "price_usd": None,
+            "provider": "golfatx",
+        },
+        {
+            "course_key": "riverside", "course_display": "Riverside",
+            "course_tier": 1, "tee_date": "2026-05-20", "tee_time": "07:30:00",
+            "grade": "A", "players_available": 3, "holes": 18,
+            "booking_url": "https://x/2", "price_usd": 45.0,
+            "provider": "golfnow",
+        },
+    ]
+    bookings = {
+        date(2026, 5, 18): {
+            **matches[0],
+            "booked_at": "2026-05-16T12:00:00", "booked_by": "Colby",
+        }
+    }
+    kb = build_digest_keyboard(matches, bookings)
+    # Should have one cancel row and one confirm row (Riverside only —
+    # Roy Kizer is filtered out as already booked).
+    all_btns = [b for row in kb.inline_keyboard for b in row]
+    cancel_btns = [b for b in all_btns if b.callback_data.startswith("cx:")]
+    confirm_btns = [b for b in all_btns if b.callback_data.startswith("cn:")]
+    assert len(cancel_btns) == 1
+    assert cancel_btns[0].callback_data == "cx:2026-05-18"
+    assert len(confirm_btns) == 1
+    assert confirm_btns[0].callback_data.startswith("cn:riverside:2026-05-20:")
+
+
+def test_build_digest_keyboard_no_bookings_yet():
+    from golfbot.notifier import build_digest_keyboard
+    matches = [{
+        "course_key": "roy_kizer", "course_display": "Roy Kizer",
+        "course_tier": 1, "tee_date": "2026-05-18", "tee_time": "07:30:00",
+        "grade": "A", "players_available": 3, "holes": 18,
+        "booking_url": "https://x/1", "price_usd": None, "provider": "golfatx",
+    }]
+    kb = build_digest_keyboard(matches, {})
+    all_btns = [b for row in kb.inline_keyboard for b in row]
+    assert all(b.callback_data.startswith("cn:") for b in all_btns)
+
+
+def test_build_digest_keyboard_callback_data_under_64_bytes():
+    from golfbot.notifier import build_digest_keyboard
+    matches = [{
+        "course_key": "grey_rock_golf_club", "course_display": "Grey Rock Golf Club",
+        "course_tier": 1, "tee_date": "2026-05-18", "tee_time": "07:30:00",
+        "grade": "A", "players_available": 3, "holes": 18,
+        "booking_url": "https://x/1", "price_usd": None, "provider": "golfnow",
+    }]
+    kb = build_digest_keyboard(matches, {})
+    for row in kb.inline_keyboard:
+        for btn in row:
+            assert len(btn.callback_data.encode("utf-8")) <= 64
+
+
 def test_render_digest_next_run_footer():
     from golfbot.notifier import render_digest
     cfg = load(REPO_ROOT / "config.yaml")
@@ -299,5 +400,5 @@ def test_render_status_paused_and_booked():
     out = render_status(state, cfg, today=date(2026, 5, 15))
     # Horizon shifts past the booking
     assert "Sun May 24 → Sat May 30" in out
-    assert "🎟  Booked: roy_kizer · Sat May 23, 8:00 AM" in out
+    assert "📌 Bookings: roy_kizer · Sat May 23, 8:00 AM" in out
     assert "🔔 Notifications: OFF (paused)" in out

@@ -75,7 +75,26 @@ matches that would notify.
 # Start the bot: APScheduler runs scans on a cadence + Telegram listens for
 # commands. First scan fires within ~10s, then on the configured interval.
 golfbot run
+
+# On a MacBook, wrap with `caffeinate -i` so macOS doesn't sleep the
+# event loop mid-schedule:
+caffeinate -i .venv/bin/golfbot run
 ```
+
+**About `caffeinate`** (macOS): a built-in that holds a sleep assertion
+while the wrapped process runs. `-i` prevents *idle sleep*. When you
+Ctrl-C the bot, the assertion releases. Without it, if the system goes
+idle (lid closed counts as idle on MacBook), APScheduler's asyncio loop
+pauses and scheduled scans get missed; with `misfire_grace_time=None`
+they fire on wake, but you'd rather not miss them in the first place.
+
+For a Mac mini deployment, you typically don't need `caffeinate` — just
+set "Prevent automatic sleeping when display is off" in System Settings
+→ Battery (or `sudo pmset -a sleep 0`) and run `golfbot run` directly.
+
+Lid-close sleep on a MacBook is *separate* from idle sleep and overrides
+`-i`; if you want the bot to keep running with the lid closed, also run
+on AC power and use `caffeinate -is` (or change the relevant pmset).
 
 Once running, the bot posts a **digest message** to the group whenever the
 match set changes — same shape as `scrape` output, one row per matching
