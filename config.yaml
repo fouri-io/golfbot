@@ -38,8 +38,8 @@ group:
   admin: Colby
   members:
     - { name: Colby, telegram_user_id: 8970212408 }
-    - { name: Steve, telegram_user_id: 0 }
-    - { name: Ed,    telegram_user_id: 0 }
+    - { name: Steve, telegram_user_id: 8870137239 }
+    - { name: Ed,    telegram_user_id: 8651242117 }
 
 telegram:
   bot_token_env: TELEGRAM_BOT_TOKEN
