@@ -51,11 +51,26 @@ def add_booking(
     """Confirm a booking from a Match dict. Returns the stored record.
 
     Replaces any existing booking for the same date.
+
+    The act of confirming is the strongest possible "I'm in" signal —
+    so the booker is always added to `members_in` (and removed from
+    `members_out` if they were there) on the booking record, regardless
+    of what availability state says.
     """
     tee_date = date.fromisoformat(match_dict["tee_date"])
     record = dict(match_dict)
     record["booked_at"] = now.isoformat()
     record["booked_by"] = booked_by
+
+    members_in = list(record.get("members_in") or [])
+    members_out = list(record.get("members_out") or [])
+    if booked_by in members_out:
+        members_out.remove(booked_by)
+    if booked_by not in members_in:
+        members_in.append(booked_by)
+    record["members_in"] = members_in
+    record["members_out"] = members_out
+
     bookings[tee_date] = record
     return record
 

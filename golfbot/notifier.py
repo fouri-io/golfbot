@@ -124,15 +124,10 @@ def render_status(state: dict, cfg: Config, today: date) -> str:
 
     course_names = ", ".join(c.display for c in cfg.courses)
 
-    booked_through = (
-        date.fromisoformat(state["horizon_override_until"])
-        if state.get("horizon_override_until") else None
-    )
     start, end = current_window(
         today=today,
         start_offset_days=cfg.search.start_offset_days,
         horizon_days=cfg.search.horizon_days,
-        booked_through=booked_through,
     )
 
     days = ", ".join(d.capitalize()[:3] for d in cfg.search.days_of_week)
@@ -423,52 +418,150 @@ def render_digest(
     next_run_at: datetime | None,
     cfg: Config,
     bookings: dict[date, dict] | None = None,
+    weather: dict[str, dict] | None = None,
 ) -> str:
-    """Render the per-scan digest message as Telegram HTML.
+    """Telegram-HTML digest. Merged-list layout.
 
-    `matches` is a list of plain dicts (see `scanner.match_to_dict`).
-    `bookings` (optional) is a {date: booking_record} map — when present,
-    a `📌 BOOKED` section is shown at the top and matches that correspond
-    to existing bookings are hidden from the "available" list.
+    The available matches AND existing bookings are surfaced as a single
+    keyboard list (in `build_digest_keyboard`) with status icons (✅/—)
+    inline on each row. The text portion shows only the title, counts,
+    and a per-date forecast block — no separate BOOKED section.
     """
-    from golfbot import bookings as bookings_mod
-
     bookings = bookings or {}
+    weather = weather or {}
     horizon = cfg.search.horizon_days
+
+    merged = _merge_rows_for_display(matches, bookings)
+
     title = f"🏌️ <b>Tee Times</b> — {_fmt_clock(run_at)}"
 
-    # Visible matches = those NOT already booked.
-    visible = [m for m in matches if not bookings_mod.match_is_booked(m, bookings)]
-
-    sections: list[str] = [title]
-
+    counts: list[str] = []
     if bookings:
-        sections.append("")
-        sections.append("<b>📌 BOOKED</b>")
-        for booking_date in sorted(bookings.keys()):
-            sections.append(_render_booking_line(bookings[booking_date]))
+        n = len(bookings)
+        counts.append(f"{n} booking{'s' if n != 1 else ''}")
+    n = len(merged)
+    counts.append(f"{n} slot{'s' if n != 1 else ''}")
+    subtitle = " · ".join(counts)
 
-    if visible:
-        sorted_visible = sorted(visible, key=lambda m: (m["tee_date"], m["tee_time"]))
+    sections: list[str] = [title, f"<i>{subtitle}</i>"]
+
+    if merged:
+        sorted_merged = sorted(merged, key=lambda x: (x["tee_date"], x["tee_time"]))
+        # Forecast block — one line per unique date, with weather + roster.
+        seen_dates: list[str] = []
+        roster_by_date: dict[str, tuple[list[str], list[str]]] = {}
+        for row in sorted_merged:
+            if row["tee_date"] not in seen_dates:
+                seen_dates.append(row["tee_date"])
+                roster_by_date[row["tee_date"]] = (
+                    row.get("members_in") or [],
+                    row.get("members_out") or [],
+                )
+
         sections.append("")
-        sections.append(
-            f"{len(visible)} available match{'es' if len(visible) != 1 else ''} "
-            f"(next {horizon} days):"
-        )
-        sections.append("")
-        for i, m in enumerate(sorted_visible, 1):
-            sections.append(f"<b>{i}.</b> " + _render_digest_line(m))
-    elif not bookings:
+        sections.append("<b>📅 Forecast</b>")
+        for d_iso in seen_dates:
+            members_in, members_out = roster_by_date[d_iso]
+            sections.append(_render_forecast_line(d_iso, weather, members_in, members_out))
+    else:
         sections.append("")
         sections.append(f"No matches in the next {horizon} days.")
         sections.append(f"Watching {len(cfg.courses)} course(s).")
-    else:
-        sections.append("")
-        sections.append("No other available matches.")
 
     sections.append("")
     sections.append(_render_footer(run_at, next_run_at))
     return "\n".join(sections)
+
+
+def _merge_rows_for_display(
+    matches: list[dict],
+    bookings: dict[date, dict],
+) -> list[dict]:
+    """Merge matches + bookings into a single deduped list.
+
+    When a slot exists in both `matches` and `bookings`, the booking
+    record wins — it has the authoritative committed roster (the booker
+    was forced into `members_in` at confirmation time).
+
+    Bookings whose slot isn't represented in the current scan still get
+    a ghost row — so the user always sees their bookings, even if the
+    provider stopped returning that slot.
+    """
+    by_key: dict[tuple, dict] = {}
+    for m in matches:
+        key = (m["course_key"], m["tee_date"], m["tee_time"])
+        by_key[key] = m
+    for _d, b in bookings.items():
+        key = (b["course_key"], b["tee_date"], b["tee_time"])
+        by_key[key] = b   # overlay — booking wins
+    return list(by_key.values())
+
+
+def _render_booking_v2(b: dict, weather: dict[str, dict], cfg: Config | None = None) -> str:
+    """e.g. '• Mon 5/18 ☀️ · 7:30 AM · Roy Kizer · Colby'"""
+    import html as _html
+    tee_date = date.fromisoformat(b["tee_date"])
+    tee_time = time.fromisoformat(b["tee_time"])
+    dow = tee_date.strftime("%a")
+    d = f"{tee_date.month}/{tee_date.day}"
+    w = weather.get(b["tee_date"])
+    emoji = _weather_emoji_from_dict(w)
+    course = _html.escape(_resolve_display(b, cfg))
+    roster = _format_roster(b.get("members_in") or [], b.get("members_out") or [])
+
+    parts = [f"<b>{dow} {d}</b>"]
+    if emoji:
+        parts.append(emoji)
+    parts.append(_fmt_time(tee_time))
+    parts.append(course)
+    if roster:
+        parts.append(roster)
+    return "• " + " · ".join(parts)
+
+
+def _resolve_display(d: dict, cfg: Config | None) -> str:
+    """Return the course display name, preferring the current config so
+    edits to `display` in config.yaml take effect immediately on the
+    next render — even if `state.last_scan` still has stale strings."""
+    if cfg is not None:
+        c = cfg.course_by_key(d.get("course_key", ""))
+        if c is not None:
+            return c.display
+    return d.get("course_display", "")
+
+
+def _render_forecast_line(
+    d_iso: str,
+    weather: dict[str, dict],
+    members_in: list[str],
+    members_out: list[str],
+) -> str:
+    """e.g. 'Wed 5/20  ⛅ 87°/66°  Rain 12%  ·  Colby+Steve (Ed out)'"""
+    d = date.fromisoformat(d_iso)
+    dow = d.strftime("%a")
+    date_str = f"{d.month}/{d.day}"
+    w = weather.get(d_iso)
+
+    parts = [f"<b>{dow} {date_str}</b>"]
+    if w:
+        emoji = _weather_emoji_from_dict(w)
+        tmax = int(round(float(w.get("tmax", 0))))
+        tmin = int(round(float(w.get("tmin", 0))))
+        rain = int(w.get("rain_pct", 0))
+        parts.append(f"{emoji} {tmax}°/{tmin}°")
+        parts.append(f"Rain {rain}%")
+
+    roster = _format_roster(members_in, members_out)
+    if roster:
+        parts.append(roster)
+    return " · ".join(parts)
+
+
+def _weather_emoji_from_dict(w: dict | None) -> str:
+    if not w:
+        return ""
+    from golfbot.weather import emoji_for
+    return emoji_for(w.get("code"))
 
 
 def _render_booking_line(b: dict) -> str:
@@ -492,46 +585,122 @@ def _render_booking_line(b: dict) -> str:
 def build_digest_keyboard(
     matches: list[dict],
     bookings: dict[date, dict] | None = None,
+    cfg: Config | None = None,
 ) -> "InlineKeyboardMarkup":
-    """Compute the inline keyboard for a digest message.
+    """Inline keyboard for the digest.
 
     Layout:
-      • Up to 2 cancel buttons per row for each existing booking.
-      • Up to 3 confirm `✓ #N` buttons per row for each visible match.
-      • Match numbers must align with the numbering in `render_digest`.
+      • One full-width URL button per slot. Status emoji prefix (`✅` if
+        booked, `—` if not) carries the at-a-glance state indicator.
+      • Compact toggle grid at the bottom, 4 per row. Each button label
+        reflects the action it'll take: `✓ #N` to confirm an unbooked
+        slot, `↩️ #N` to cancel a booked one.
+      • Numbering and order match `render_digest` — sorted (date, time).
     """
     from golfbot import bookings as bookings_mod
 
     bookings = bookings or {}
+    merged = _merge_rows_for_display(matches, bookings)
+    sorted_merged = sorted(merged, key=lambda x: (x["tee_date"], x["tee_time"]))
+
     rows: list[list[InlineKeyboardButton]] = []
 
-    # Cancel buttons (one per booking, sorted by date, 2 per row).
-    if bookings:
-        cancel_btns: list[InlineKeyboardButton] = []
-        for booking_date in sorted(bookings.keys()):
-            short = f"{booking_date.strftime('%a')} {booking_date.month}/{booking_date.day}"
-            cancel_btns.append(InlineKeyboardButton(
-                f"↩️ Cancel {short}",
-                callback_data=f"cx:{booking_date.isoformat()}",
-            ))
-        for i in range(0, len(cancel_btns), 2):
-            rows.append(cancel_btns[i:i + 2])
+    # URL info rows with status prefix.
+    for i, row in enumerate(sorted_merged, 1):
+        is_booked = bookings_mod.match_is_booked(row, bookings)
+        status = "✅" if is_booked else "—"
+        rows.append([
+            InlineKeyboardButton(
+                _row_button_text(i, row, status, cfg, is_booked=is_booked),
+                url=row["booking_url"],
+            ),
+        ])
 
-    # Confirm buttons (one per visible match, sorted, 3 per row).
-    visible = [m for m in matches if not bookings_mod.match_is_booked(m, bookings)]
-    if visible:
-        sorted_visible = sorted(visible, key=lambda m: (m["tee_date"], m["tee_time"]))
-        confirm_btns: list[InlineKeyboardButton] = []
-        for i, m in enumerate(sorted_visible, 1):
-            hhmm = m["tee_time"].replace(":", "")[:4]
-            confirm_btns.append(InlineKeyboardButton(
-                f"✓ #{i}",
-                callback_data=f"cn:{m['course_key']}:{m['tee_date']}:{hhmm}",
+    # Compact toggle grid.
+    if sorted_merged:
+        toggle_btns: list[InlineKeyboardButton] = []
+        for i, row in enumerate(sorted_merged, 1):
+            hhmm = row["tee_time"].replace(":", "")[:4]
+            is_booked = bookings_mod.match_is_booked(row, bookings)
+            label = f"↩️ #{i}" if is_booked else f"✓ #{i}"
+            toggle_btns.append(InlineKeyboardButton(
+                label,
+                callback_data=f"tb:{row['course_key']}:{row['tee_date']}:{hhmm}",
             ))
-        for i in range(0, len(confirm_btns), 3):
-            rows.append(confirm_btns[i:i + 3])
+        per_row = 4
+        for j in range(0, len(toggle_btns), per_row):
+            rows.append(toggle_btns[j:j + per_row])
 
     return InlineKeyboardMarkup(rows)
+
+
+def _row_button_text(
+    idx: int,
+    row: dict,
+    status: str,
+    cfg: Config | None = None,
+    is_booked: bool = False,
+) -> str:
+    """e.g. '— 2. Wed Jimmy Clay 7:30A · 3 open · $25' for unbooked,
+    or '✅ 1. Mon Roy Kizer 7:30A · Colby+Steve · $25' for booked.
+
+    The "3 open" segment is replaced with the committed roster on booked
+    rows — slot count is moot once you've claimed the slot, but who's
+    going matters.
+    """
+    tee_date = date.fromisoformat(row["tee_date"])
+    tee_time = time.fromisoformat(row["tee_time"])
+    dow = tee_date.strftime("%a")
+    parts = [
+        f"{status} {idx}.",
+        dow,
+        _resolve_display(row, cfg),
+        _short_time(tee_time),
+    ]
+    if is_booked:
+        roster = "+".join(row.get("members_in") or [])
+        if roster:
+            parts.append(f"· {roster}")
+    else:
+        parts.append(f"· {row['players_available']} open")
+    price = row.get("price_usd")
+    if price:
+        parts.append(f"· ${int(round(float(price)))}")
+    return " ".join(parts)
+
+
+def _short_time(t: time) -> str:
+    """Compact AM/PM, e.g. '7:30A' or '12:30P'. Saves chars on buttons."""
+    h = t.hour % 12 or 12
+    am_pm = "A" if t.hour < 12 else "P"
+    return f"{h}:{t.minute:02d}{am_pm}"
+
+
+def _booking_button_text(b: dict, cfg: Config | None = None) -> str:
+    """e.g. '📌 Mon 5/18 7:30A Roy Kizer'."""
+    tee_date = date.fromisoformat(b["tee_date"])
+    tee_time = time.fromisoformat(b["tee_time"])
+    dow = tee_date.strftime("%a")
+    d = f"{tee_date.month}/{tee_date.day}"
+    return f"📌 {dow} {d} {_short_time(tee_time)} {_resolve_display(b, cfg)}"
+
+
+def _match_button_text(idx: int, m: dict, cfg: Config | None = None) -> str:
+    """e.g. '1. Wed Riverside 7:30A · 3 open · $45'."""
+    tee_date = date.fromisoformat(m["tee_date"])
+    tee_time = time.fromisoformat(m["tee_time"])
+    dow = tee_date.strftime("%a")
+    parts = [
+        f"{idx}.",
+        dow,
+        _resolve_display(m, cfg),
+        _short_time(tee_time),
+        f"· {m['players_available']} open",
+    ]
+    price = m.get("price_usd")
+    if price:
+        parts.append(f"· ${int(round(float(price)))}")
+    return " ".join(parts)
 
 
 def _render_digest_line(m: dict) -> str:
@@ -596,12 +765,16 @@ async def send_digest(
     next_run_at: datetime | None,
     cfg: Config,
     bookings: dict[date, dict] | None = None,
+    weather: dict[str, dict] | None = None,
 ) -> int:
     """Send the digest message; return Telegram message_id."""
     msg = await bot.send_message(
         chat_id=chat_id,
-        text=render_digest(matches, run_at, next_run_at, cfg, bookings=bookings),
-        reply_markup=build_digest_keyboard(matches, bookings),
+        text=render_digest(
+            matches, run_at, next_run_at, cfg,
+            bookings=bookings, weather=weather,
+        ),
+        reply_markup=build_digest_keyboard(matches, bookings, cfg=cfg),
         parse_mode=ParseMode.HTML,
         disable_web_page_preview=True,
     )

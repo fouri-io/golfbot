@@ -199,7 +199,6 @@ def _cmd_scrape(args: argparse.Namespace) -> int:
             today=today,
             start_offset_days=cfg.search.start_offset_days,
             horizon_days=cfg.search.horizon_days,
-            booked_through=None,
         )
         dates = []
         d = start

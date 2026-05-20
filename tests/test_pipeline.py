@@ -56,10 +56,12 @@ def test_is_desired_day_weekend():
 # ---------- filter_and_grade ----------
 
 
-def test_filter_drops_wrong_day_of_week(cfg):
-    # 2026-05-23 = Sat, config defaults to Mon-Fri
+def test_filter_no_longer_drops_by_day_of_week(cfg):
+    """The pipeline no longer filters by `days_of_week` — per-member
+    weekly availability patterns handle this instead. The slot survives
+    grading; the scanner's availability check decides whether to scan it."""
     slots = [_slot("roy_kizer", date(2026, 5, 23), time(7, 30))]
-    assert filter_and_grade(slots, cfg) == []
+    assert len(filter_and_grade(slots, cfg)) == 1
 
 
 def test_filter_drops_unknown_course(cfg):

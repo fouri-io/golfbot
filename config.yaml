@@ -21,10 +21,10 @@ courses:
 
   # Private / semi-private courses — GolfNow.
   - { key: riverside,            display: "Riverside",            tier: 1, provider: golfnow, provider_id: 888 }
-  - { key: grey_rock_golf_club,  display: "Grey Rock Golf Club",  tier: 1, provider: golfnow, provider_id: 166 }
-  - { key: golf-club-star-ranch, display: "The Golf Club at Star Ranch", tier: 1, provider: golfnow, provider_id: 151 }
-  - { key: falconhead_golf_club, display: "Falconhead Golf Club", tier: 2, provider: golfnow, provider_id: 321 }
-  - { key: avery_ranch_golf_club, display: "Avery Ranch Golf Club", tier: 2, provider: golfnow, provider_id: 206 }
+  - { key: grey_rock_golf_club,  display: "Grey Rock",  tier: 1, provider: golfnow, provider_id: 166 }
+  - { key: golf-club-star-ranch, display: "Star Ranch", tier: 1, provider: golfnow, provider_id: 151 }
+  - { key: falconhead_golf_club, display: "Falconhead", tier: 2, provider: golfnow, provider_id: 321 }
+  - { key: avery_ranch_golf_club, display: "Avery Ranch", tier: 2, provider: golfnow, provider_id: 206 }
 
 grading:
   notify_min_grade: B
@@ -47,3 +47,11 @@ group:
 telegram:
   bot_token_env: TELEGRAM_BOT_TOKEN
   chat_id_env:   TELEGRAM_CHAT_ID
+
+# Daily forecast via Open-Meteo (no API key needed; cached in state.json).
+# Comment this block out (or set enabled: false) to disable weather.
+weather:
+  enabled: true
+  latitude: 30.26715       # downtown Austin
+  longitude: -97.74306
+  cache_hours: 6           # refresh at most this often

@@ -54,13 +54,17 @@ def is_desired_day(d: date, days_of_week: list[str]) -> bool:
 
 
 def filter_and_grade(slots: list[RawSlot], cfg: Config) -> list[Match]:
-    """Apply day-of-week, time-window, and grading filters in order.
+    """Apply time-window and grading filters in order.
 
     Drops slots that:
-      - fall on a day-of-week we don't care about
       - have a course_key not in cfg.courses
       - are outside the acceptable time window
       - grade below the notify_min_grade threshold
+
+    Day-of-week filtering is no longer applied here — per-member weekly
+    availability patterns (in `availability.AvailabilityRecord`) handle
+    that more flexibly. The `cfg.search.days_of_week` field is now
+    advisory (kept for backward compat with old configs).
     """
     by_key = {c.key: c for c in cfg.courses}
     ideal = cfg.time_windows.ideal
@@ -69,8 +73,6 @@ def filter_and_grade(slots: list[RawSlot], cfg: Config) -> list[Match]:
 
     out: list[Match] = []
     for s in slots:
-        if not is_desired_day(s.tee_date, cfg.search.days_of_week):
-            continue
         course = by_key.get(s.course_key)
         if course is None:
             continue

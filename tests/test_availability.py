@@ -66,10 +66,14 @@ def test_set_out_dedupes():
     assert avail["Colby"].out_dates == [date(2026, 5, 20)]
 
 
-def test_set_in_unknown_member_is_noop():
+def test_set_in_creates_record_with_in_dates():
+    """set_in now creates a record for an unseen member with an in_dates
+    override — useful for one-off opt-ins (e.g. someone wants to play
+    this Saturday even though weekends are out by default)."""
     avail: dict = {}
     avail_mod.set_in("Ghost", [date(2026, 5, 20)], avail)
-    assert avail == {}
+    assert "Ghost" in avail
+    assert date(2026, 5, 20) in avail["Ghost"].in_dates
 
 
 # ---------- date_should_be_scanned ----------
@@ -185,54 +189,54 @@ def test_load_prunes_past_dates():
 # ---------- build_avail_grid (UI helper) ----------
 
 
-def test_build_avail_grid_solo_member(cfg):
+def test_build_avail_grid_weekly_layout(cfg):
+    """New weekly grid: 7 rows (Mon-Sun), each with a weekday label and
+    one toggle button per registered member."""
     from golfbot.bot import build_avail_grid
-    today = date(2026, 5, 16)
-    text, keyboard = build_avail_grid(cfg, {}, today)
+    text, keyboard = build_avail_grid(cfg, {})
 
-    # One row per horizon day
     rows = keyboard.inline_keyboard
-    assert len(rows) == cfg.search.horizon_days
+    assert len(rows) == 7   # one per weekday
 
-    # Each row: date label + one button per registered member
     members = avail_mod.registered_members(cfg)
     expected_per_row = 1 + len(members)
     for row in rows:
         assert len(row) == expected_per_row
 
-    # First button is no-op (date label)
+    # First button on each row is a no-op weekday label.
     assert rows[0][0].callback_data == "noop"
+    assert rows[0][0].text == "Mon"
+    assert rows[6][0].text == "Sun"
 
-    # Member button text shows ✅ by default (no out_dates set)
-    member_button = rows[0][1]
-    assert member_button.text.startswith("✅ ")
-    assert members[0] in member_button.text
-    assert member_button.callback_data.startswith("av:")
+    # Default: weekdays IN (✅), weekends OUT (❌).
+    mon_first_member = rows[0][1]    # Mon row, first member
+    sat_first_member = rows[5][1]    # Sat row, first member
+    assert mon_first_member.text.startswith("✅ ")
+    assert sat_first_member.text.startswith("❌ ")
+
+    # Callback data uses "aw:" prefix.
+    assert mon_first_member.callback_data.startswith("aw:")
 
 
-def test_build_avail_grid_reflects_out_dates(cfg):
+def test_build_avail_grid_reflects_out_weekdays(cfg):
+    """A weekly pattern with Wed set OUT should show ❌ on the Wed row."""
     from golfbot.bot import build_avail_grid
-    today = date(2026, 5, 16)
     members = avail_mod.registered_members(cfg)
-    out_date = today + timedelta(days=2)
     availability = {
-        members[0]: avail_mod.AvailabilityRecord(out_dates=[out_date])
+        members[0]: avail_mod.AvailabilityRecord(out_weekdays={2})   # Wed
     }
-    text, keyboard = build_avail_grid(cfg, availability, today)
+    _, keyboard = build_avail_grid(cfg, availability)
 
-    # Find the row for out_date (today+2 → index 1 since horizon starts today+1)
     rows = keyboard.inline_keyboard
-    out_row = rows[1]
-    member_button = out_row[1]
-    assert member_button.text.startswith("❌ "), \
-        f"expected ❌ for out date, got {member_button.text!r}"
+    wed_row = rows[2]    # Mon=0, Tue=1, Wed=2
+    member_button = wed_row[1]
+    assert member_button.text.startswith("❌ ")
 
 
 def test_build_avail_grid_callback_data_fits_telegram_limit(cfg):
     """All callback_data must fit in 64 bytes (Telegram hard limit)."""
     from golfbot.bot import build_avail_grid
-    today = date(2026, 5, 16)
-    _, keyboard = build_avail_grid(cfg, {}, today)
+    _, keyboard = build_avail_grid(cfg, {})
     for row in keyboard.inline_keyboard:
         for btn in row:
             if btn.callback_data is not None:

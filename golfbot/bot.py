@@ -107,10 +107,12 @@ def build_app(
     app.add_handler(CommandHandler("unbook", cmd_unbook))
     app.add_handler(CommandHandler("courses", cmd_courses))
     app.add_handler(CommandHandler("whoami", cmd_whoami))
-    # Booking callbacks (confirm / cancel) — must match before generic.
+    # Booking callbacks (unified toggle, plus legacy cn/cx for old messages).
+    app.add_handler(CallbackQueryHandler(cb_toggle, pattern=r"^tb:"))
     app.add_handler(CallbackQueryHandler(cb_confirm, pattern=r"^cn:"))
     app.add_handler(CallbackQueryHandler(cb_cancel, pattern=r"^cx:"))
-    # Availability grid callbacks.
+    # Availability grid callbacks (weekly pattern + legacy date-toggle).
+    app.add_handler(CallbackQueryHandler(cb_avail_toggle_weekly, pattern=r"^aw:"))
     app.add_handler(CallbackQueryHandler(cb_avail_toggle, pattern=r"^av:"))
     app.add_handler(CallbackQueryHandler(cb_noop, pattern=r"^noop$"))
     # Fallback: legacy per-slot voting (mock command).
@@ -165,11 +167,12 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def cmd_tee(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Re-render the most recent scan's digest with current bookings."""
+    """Re-render the most recent scan's digest with current bookings + weather."""
     from datetime import datetime as _dt
 
     from golfbot import bookings as bookings_mod
     from golfbot import notifier as _notifier
+    from golfbot import scanner as _scanner
 
     if update.message is None:
         return
@@ -186,14 +189,16 @@ async def cmd_tee(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     next_run_at = _dt.fromisoformat(next_run_iso) if next_run_iso else None
     matches = last.get("matches", [])
     bookings = bookings_mod.load_bookings(state)
+    weather = _scanner._weather_dict_for_render(state)
     text = _notifier.render_digest(
         matches=matches,
         run_at=run_at,
         next_run_at=next_run_at,
         cfg=ctx.cfg,
         bookings=bookings,
+        weather=weather,
     )
-    keyboard = _notifier.build_digest_keyboard(matches, bookings)
+    keyboard = _notifier.build_digest_keyboard(matches, bookings, cfg=ctx.cfg)
     await update.message.reply_text(
         text,
         reply_markup=keyboard,
@@ -227,36 +232,45 @@ async def cmd_avail(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
-def build_avail_grid(cfg, availability, today):
-    """Build the (text, InlineKeyboardMarkup) pair for the availability grid.
+def build_avail_grid(cfg, availability, today=None):
+    """Build the (text, InlineKeyboardMarkup) pair for the weekly-pattern grid.
 
-    Layout: one row per date in the search horizon. First button on each
-    row is a no-op date label; remaining buttons are one per registered
-    member, color-coded.
+    Layout: one row per weekday (Mon..Sun). First button on each row is a
+    no-op weekday label; remaining buttons are one per registered member,
+    showing whether that member is IN (✅) or OUT (❌) on that weekday.
+    Tapping toggles the member's weekly pattern.
+
+    `today` arg is unused (kept for backward compat / tests).
     """
-    from datetime import timedelta
-
     from golfbot import availability as avail_mod
 
     members = avail_mod.registered_members(cfg)
-    horizon_days = cfg.search.horizon_days
-    horizon = [today + timedelta(days=i) for i in range(1, horizon_days + 1)]
 
     text = (
-        f"🗓 <b>Availability</b> — next {horizon_days} days\n"
-        f"Tap your name to toggle ✅/❌."
+        "🗓 <b>Weekly Availability</b>\n"
+        "Tap your name to toggle in/out for that weekday.\n"
+        "<i>Per-date one-offs: /out 5/20 · /in 5/20</i>"
     )
 
+    weekday_labels = [
+        ("Mon", 0), ("Tue", 1), ("Wed", 2), ("Thu", 3),
+        ("Fri", 4), ("Sat", 5), ("Sun", 6),
+    ]
+
     rows = []
-    for d in horizon:
-        date_label = f"{d.strftime('%a')} {d.month}/{d.day}"
-        row = [InlineKeyboardButton(date_label, callback_data="noop")]
+    for label, idx in weekday_labels:
+        row = [InlineKeyboardButton(label, callback_data="noop")]
         for member in members:
-            in_yes = avail_mod.is_available(member, d, availability)
-            icon = "✅" if in_yes else "❌"
+            rec = availability.get(member)
+            if rec is None:
+                # default record: weekend off
+                is_in = idx not in {5, 6}
+            else:
+                is_in = idx not in rec.out_weekdays
+            icon = "✅" if is_in else "❌"
             row.append(InlineKeyboardButton(
                 f"{icon} {member}",
-                callback_data=f"av:{member}:{d.isoformat()}",
+                callback_data=f"aw:{member}:{idx}",
             ))
         rows.append(row)
 
@@ -320,6 +334,50 @@ async def cb_noop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.callback_query.answer()
 
 
+async def cb_avail_toggle_weekly(
+    update: Update, context: ContextTypes.DEFAULT_TYPE,
+) -> None:
+    """Tap a weekly-pattern button. Toggles `out_weekdays` for the member."""
+    from golfbot import availability as avail_mod
+
+    q = update.callback_query
+    if q is None or q.data is None or q.from_user is None:
+        return
+
+    try:
+        _prefix, name, weekday_str = q.data.split(":", 2)
+        weekday = int(weekday_str)
+    except (ValueError, IndexError):
+        await q.answer("Bad availability data.", show_alert=True)
+        return
+    if not 0 <= weekday <= 6:
+        await q.answer("Bad weekday.", show_alert=True)
+        return
+
+    ctx = _ctx(context)
+    caller_name = ctx.member_name_for(q.from_user.id)
+    if caller_name != name:
+        if caller_name is None:
+            await q.answer("You're not on the roster.", show_alert=True)
+        else:
+            await q.answer(
+                f"Only {name} can toggle {name}'s schedule.",
+                show_alert=True,
+            )
+        return
+
+    state = store.load_state(ctx.state_path)
+    availability = avail_mod.load_availability(state)
+    is_out_now = avail_mod.toggle_weekday(name, weekday, availability)
+    avail_mod.save_availability(state, availability)
+    await store.save_state(ctx.state_path, state)
+
+    weekday_label = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][weekday]
+    _, keyboard = build_avail_grid(ctx.cfg, availability)
+    await q.edit_message_reply_markup(reply_markup=keyboard)
+    await q.answer(f"{name} {'OUT' if is_out_now else 'IN'} on {weekday_label}s")
+
+
 async def cb_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Tap `✓ #N` on a digest match → record the booking."""
     from datetime import datetime as _dt
@@ -376,6 +434,89 @@ async def cb_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     )
 
 
+async def cb_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Tap `✓ #N` / `↩️ #N` on a digest row — toggles booked status.
+
+    If the slot is currently booked, cancels it. If not, confirms it
+    (replacing any existing booking on the same date — one per date).
+    """
+    from datetime import date as _date
+
+    from golfbot import bookings as bookings_mod
+
+    q = update.callback_query
+    if q is None or q.data is None or q.from_user is None:
+        return
+
+    try:
+        _prefix, course_key, tee_date_iso, hhmm = q.data.split(":", 3)
+    except ValueError:
+        await q.answer("Bad toggle data.", show_alert=True)
+        return
+
+    ctx = _ctx(context)
+    if not ctx.is_admin(q.from_user.id):
+        await q.answer("Admin only.", show_alert=True)
+        return
+
+    try:
+        target_date = _date.fromisoformat(tee_date_iso)
+    except ValueError:
+        await q.answer("Bad date.", show_alert=True)
+        return
+
+    state = store.load_state(ctx.state_path)
+    bookings = bookings_mod.load_bookings(state)
+
+    existing = bookings.get(target_date)
+    same_slot = (
+        existing is not None
+        and existing.get("course_key") == course_key
+        and (existing.get("tee_time", "")[:5].replace(":", "") == hhmm)
+    )
+
+    if same_slot:
+        # Cancel the booking for this slot.
+        removed = bookings_mod.cancel_booking(bookings, target_date)
+        bookings_mod.save_bookings(state, bookings)
+        await store.save_state(ctx.state_path, state)
+        last = state.get("last_scan") or {}
+        matches = last.get("matches", [])
+        await _refresh_digest_message(q, ctx, state, last, bookings, matches)
+        course = (removed or {}).get("course_display", "")
+        await q.answer(f"↩️ Cancelled: {course} {tee_date_iso}".strip())
+        return
+
+    # Find the match in last_scan to confirm.
+    last = state.get("last_scan") or {}
+    matches = last.get("matches", [])
+    target_match = None
+    for m in matches:
+        if (
+            m.get("course_key") == course_key
+            and m.get("tee_date") == tee_date_iso
+            and m.get("tee_time", "")[:5].replace(":", "") == hhmm
+        ):
+            target_match = m
+            break
+    if target_match is None:
+        await q.answer(
+            "Match isn't in the last scan anymore. Try /scan to refresh.",
+            show_alert=True,
+        )
+        return
+
+    booked_by = ctx.member_name_for(q.from_user.id) or ctx.cfg.group.admin
+    bookings_mod.add_booking(bookings, target_match, booked_by, ctx.now())
+    bookings_mod.save_bookings(state, bookings)
+    await store.save_state(ctx.state_path, state)
+    await _refresh_digest_message(q, ctx, state, last, bookings, matches)
+    await q.answer(
+        f"✅ Booked: {target_match['course_display']} "
+        f"{target_match['tee_date']} {target_match['tee_time'][:5]}"
+    )
+
+
 async def cb_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Tap `↩️ Cancel <date>` on a booking → remove it."""
     from datetime import date as _date
@@ -421,8 +562,10 @@ async def _refresh_digest_message(q, ctx, state, last, bookings, matches) -> Non
     """Edit the message backing the callback to reflect new bookings state."""
     from datetime import datetime as _dt
 
-    from golfbot import notifier as _notifier
     from telegram.constants import ParseMode
+
+    from golfbot import notifier as _notifier
+    from golfbot import scanner as _scanner
 
     run_at_iso = last.get("run_at")
     if run_at_iso:
@@ -431,14 +574,16 @@ async def _refresh_digest_message(q, ctx, state, last, bookings, matches) -> Non
         run_at = ctx.now()
     next_run_iso = last.get("next_run_at")
     next_run_at = _dt.fromisoformat(next_run_iso) if next_run_iso else None
+    weather = _scanner._weather_dict_for_render(state)
     text = _notifier.render_digest(
         matches=matches,
         run_at=run_at,
         next_run_at=next_run_at,
         cfg=ctx.cfg,
         bookings=bookings,
+        weather=weather,
     )
-    keyboard = _notifier.build_digest_keyboard(matches, bookings)
+    keyboard = _notifier.build_digest_keyboard(matches, bookings, cfg=ctx.cfg)
     try:
         await q.edit_message_text(
             text,
@@ -610,7 +755,6 @@ async def cmd_full(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         today=today,
         start_offset_days=ctx.cfg.search.start_offset_days,
         horizon_days=ctx.cfg.search.horizon_days,
-        booked_through=None,
     )
     days_set = {_DAY_INDEX[name] for name in ctx.cfg.search.days_of_week}
     dates: list = []

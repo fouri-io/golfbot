@@ -119,17 +119,18 @@ def test_record_vote_rejects_non_open_slot():
 # ---------- mark_booked ----------
 
 
-def test_mark_booked_sets_status_and_horizon():
+def test_mark_booked_sets_status_and_booking():
     state = default_state()
     state["tee_times"].append(_make_slot())
     slot, booking = actions.mark_booked(state, _make_slot()["id"], "Colby", NOW)
     assert slot["status"] == "booked"
     assert slot["booked_by"] == "Colby"
     assert slot["booked_at"] == NOW.isoformat()
-    assert state["horizon_override_until"] == "2026-05-23"
     assert booking["booked_by"] == "Colby"
     assert booking["tee_date"] == "2026-05-23"
     assert booking["undone_at"] is None
+    # No longer touches horizon_override_until (dead state field).
+    assert "horizon_override_until" not in state
 
 
 def test_mark_booked_captures_roster():
@@ -197,7 +198,7 @@ def test_set_paused_false_clears_timestamp():
 # ---------- undo_booking ----------
 
 
-def test_undo_booking_reverts_status_and_clears_override():
+def test_undo_booking_reverts_status():
     state = default_state()
     state["tee_times"].append(_make_slot())
     sid = _make_slot()["id"]
@@ -208,7 +209,6 @@ def test_undo_booking_reverts_status_and_clears_override():
     assert slot["status"] == "open"
     assert "booked_by" not in slot
     assert "booked_at" not in slot
-    assert state["horizon_override_until"] is None
     assert undo["undone_at"] == later.isoformat()
     assert undo["tee_date"] == "2026-05-23"
 

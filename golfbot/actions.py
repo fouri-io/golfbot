@@ -113,7 +113,6 @@ def mark_booked(
     slot["status"] = "booked"
     slot["booked_by"] = booked_by
     slot["booked_at"] = now.isoformat()
-    state["horizon_override_until"] = slot["tee_date"]
 
     booking = {
         "booked_at": now.isoformat(),
@@ -165,7 +164,6 @@ def undo_booking(
     slot["status"] = "open"
     slot.pop("booked_by", None)
     slot.pop("booked_at", None)
-    state["horizon_override_until"] = None
 
     undo_record = {
         "undone_at": now.isoformat(),

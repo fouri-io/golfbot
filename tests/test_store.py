@@ -53,15 +53,14 @@ async def test_save_state_serializes_datetime(tmp_path):
     p = tmp_path / "state.json"
     state = default_state()
     state["last_poll_at"] = datetime(2026, 5, 15, 18, 0, 0)
-    state["horizon_override_until"] = date(2026, 5, 23)
-    state["tee_times"].append({"tee_time": time(8, 0)})
+    state["tee_times"].append({"tee_time": time(8, 0), "tee_date": date(2026, 5, 23)})
     await save_state(p, state)
 
     # On disk these are ISO strings.
     raw = json.loads(p.read_text())
     assert raw["last_poll_at"] == "2026-05-15T18:00:00"
-    assert raw["horizon_override_until"] == "2026-05-23"
     assert raw["tee_times"][0]["tee_time"] == "08:00:00"
+    assert raw["tee_times"][0]["tee_date"] == "2026-05-23"
 
 
 async def test_save_state_rejects_unknown_type(tmp_path):

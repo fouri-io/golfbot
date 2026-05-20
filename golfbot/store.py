@@ -31,7 +31,6 @@ def default_state() -> dict[str, Any]:
         "paused": False,
         "pause_started_at": None,
         "last_poll_at": None,
-        "horizon_override_until": None,
         "tee_times": [],
     }
 

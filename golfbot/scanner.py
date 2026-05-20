@@ -25,6 +25,7 @@ from dataclasses import replace
 from golfbot import availability as avail_mod
 from golfbot import bookings as bookings_mod
 from golfbot import notifier, store
+from golfbot import weather as weather_mod
 from golfbot.config import Config
 from golfbot.horizon import current_window
 from golfbot.pipeline import Match, apply_policy_b, filter_and_grade
@@ -180,7 +181,6 @@ async def scan_and_notify(
         today=today,
         start_offset_days=cfg.search.start_offset_days,
         horizon_days=cfg.search.horizon_days,
-        booked_through=None,
     )
     dates: list[date] = []
     d = start
@@ -209,6 +209,21 @@ async def scan_and_notify(
 
     state["last_poll_at"] = now.isoformat()
     paused = bool(state.get("paused"))
+
+    # Refresh weather cache if configured and stale.
+    if cfg.weather is not None and cfg.weather.enabled:
+        fetched_at, _ = weather_mod.load_cache(state)
+        if not weather_mod.is_fresh(fetched_at, now, cfg.weather.cache_hours):
+            try:
+                days = await weather_mod.fetch_forecast(
+                    cfg.weather.latitude,
+                    cfg.weather.longitude,
+                    cfg.timezone,
+                )
+                weather_mod.save_cache(state, now, days)
+                log.info("weather: refreshed forecast (%d days)", len(days))
+            except Exception:
+                log.warning("weather: fetch failed; using existing cache if any", exc_info=True)
 
     # Compare against previous match set
     current_dicts = [match_to_dict(m) for m in matches]
@@ -239,6 +254,7 @@ async def scan_and_notify(
     else:
         try:
             bookings = bookings_mod.load_bookings(state)
+            weather_dict = _weather_dict_for_render(state)
             msg_id = await notifier.send_digest(
                 bot=bot,
                 chat_id=chat_id,
@@ -247,6 +263,7 @@ async def scan_and_notify(
                 next_run_at=next_run_at,
                 cfg=cfg,
                 bookings=bookings,
+                weather=weather_dict,
             )
             last_scan["telegram_message_id"] = msg_id
             state["last_digest_at"] = now.isoformat()
@@ -279,6 +296,12 @@ def match_to_dict(m: Match) -> dict[str, Any]:
         "members_in": list(m.members_in),
         "members_out": list(m.members_out),
     }
+
+
+def _weather_dict_for_render(state: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Renderer-friendly weather: {iso_date_str: WeatherDay.to_dict()}."""
+    _, days = weather_mod.load_cache(state)
+    return {d.isoformat(): wd.to_dict() for d, wd in days.items()}
 
 
 def _signature(match_dicts: list[dict[str, Any]]) -> frozenset[tuple]:

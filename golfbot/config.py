@@ -130,6 +130,14 @@ class Telegram(BaseModel):
     chat_id_env: str
 
 
+class WeatherConfig(BaseModel):
+    """Daily forecast via Open-Meteo. Cached in state.json."""
+    enabled: bool = True
+    latitude: float
+    longitude: float
+    cache_hours: float = Field(default=6.0, ge=0.5)
+
+
 class Config(BaseModel):
     timezone: str
     search: Search
@@ -139,6 +147,7 @@ class Config(BaseModel):
     polling: Polling
     group: Group
     telegram: Telegram
+    weather: WeatherConfig | None = None    # None = disabled
 
     @field_validator("timezone")
     @classmethod

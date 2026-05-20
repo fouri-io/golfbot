@@ -6,7 +6,7 @@ from datetime import date, datetime
 from golfbot import bookings as bookings_mod
 
 
-def _match(course="roy_kizer", d="2026-05-18", t="07:30:00"):
+def _match(course="roy_kizer", d="2099-05-18", t="07:30:00"):
     return {
         "course_key": course,
         "course_display": "Roy Kizer",
@@ -29,11 +29,11 @@ def test_add_and_load_roundtrip():
     bookings: dict = {}
     bookings_mod.add_booking(bookings, _match(), "Colby", datetime(2026, 5, 16, 12, 0))
     bookings_mod.save_bookings(state, bookings)
-    assert "2026-05-18" in state["bookings"]
-    assert state["bookings"]["2026-05-18"]["booked_by"] == "Colby"
+    assert "2099-05-18" in state["bookings"]
+    assert state["bookings"]["2099-05-18"]["booked_by"] == "Colby"
 
     reloaded = bookings_mod.load_bookings(state)
-    assert date(2026, 5, 18) in reloaded
+    assert date(2099, 5, 18) in reloaded
 
 
 def test_add_replaces_same_date():
@@ -41,13 +41,13 @@ def test_add_replaces_same_date():
     bookings_mod.add_booking(bookings, _match(course="roy_kizer"), "Colby", datetime(2026, 5, 16))
     bookings_mod.add_booking(bookings, _match(course="riverside"), "Colby", datetime(2026, 5, 16))
     assert len(bookings) == 1
-    assert bookings[date(2026, 5, 18)]["course_key"] == "riverside"
+    assert bookings[date(2099, 5, 18)]["course_key"] == "riverside"
 
 
 def test_cancel_returns_removed_record():
     bookings: dict = {}
     bookings_mod.add_booking(bookings, _match(), "Colby", datetime(2026, 5, 16))
-    removed = bookings_mod.cancel_booking(bookings, date(2026, 5, 18))
+    removed = bookings_mod.cancel_booking(bookings, date(2099, 5, 18))
     assert removed is not None
     assert removed["course_key"] == "roy_kizer"
     assert bookings == {}
@@ -55,7 +55,7 @@ def test_cancel_returns_removed_record():
 
 def test_cancel_unknown_date_returns_none():
     bookings: dict = {}
-    assert bookings_mod.cancel_booking(bookings, date(2026, 5, 18)) is None
+    assert bookings_mod.cancel_booking(bookings, date(2099, 5, 18)) is None
 
 
 def test_load_prunes_past_dates():
@@ -85,3 +85,29 @@ def test_match_is_booked_false_for_different_time():
 
 def test_match_is_booked_false_when_no_booking():
     assert bookings_mod.match_is_booked(_match(), {}) is False
+
+
+def test_add_booking_forces_booker_into_members_in():
+    """If the booker was marked out (or just absent from members_in),
+    confirming should bring them in. This is the strongest 'I'm in' signal."""
+    bookings: dict = {}
+    m = _match()
+    m["members_in"] = ["Steve", "Ed"]
+    m["members_out"] = ["Colby"]
+    bookings_mod.add_booking(bookings, m, "Colby", datetime(2026, 5, 16))
+    rec = bookings[date(2099, 5, 18)]
+    assert "Colby" in rec["members_in"]
+    assert "Colby" not in rec["members_out"]
+    assert "Steve" in rec["members_in"]
+    assert "Ed" in rec["members_in"]
+
+
+def test_add_booking_idempotent_when_booker_already_in():
+    bookings: dict = {}
+    m = _match()
+    m["members_in"] = ["Colby", "Steve"]
+    m["members_out"] = []
+    bookings_mod.add_booking(bookings, m, "Colby", datetime(2026, 5, 16))
+    rec = bookings[date(2099, 5, 18)]
+    assert rec["members_in"] == ["Colby", "Steve"]
+    assert rec["members_out"] == []

@@ -34,17 +34,46 @@ from golfbot.config import Config
 # --------------------------------------------------------------------------- #
 
 
+_DEFAULT_OUT_WEEKDAYS: frozenset[int] = frozenset({5, 6})   # Sat, Sun
+
+
 @dataclass
 class AvailabilityRecord:
-    """A single member's availability — list of dates they're out."""
+    """A single member's availability.
+
+    Two layers of state — weekly pattern plus optional per-date overrides:
+      • `out_weekdays`: set of weekday ints (Mon=0..Sun=6) this member is
+        OUT every week. Default is `{Sat, Sun}` for new members.
+      • `out_dates`: per-date OUT overrides (member is normally available
+        that weekday but is out for a specific date).
+      • `in_dates`: per-date IN overrides (member is normally out on that
+        weekday but is available for a specific date).
+    """
+    out_weekdays: set[int] = field(default_factory=lambda: set(_DEFAULT_OUT_WEEKDAYS))
     out_dates: list[date] = field(default_factory=list)
+    in_dates: list[date] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
-        return {"out_dates": [d.isoformat() for d in sorted(self.out_dates)]}
+        return {
+            "out_weekdays": sorted(self.out_weekdays),
+            "out_dates": [d.isoformat() for d in sorted(self.out_dates)],
+            "in_dates": [d.isoformat() for d in sorted(self.in_dates)],
+        }
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> AvailabilityRecord:
-        return cls(out_dates=[date.fromisoformat(s) for s in d.get("out_dates", [])])
+        # out_weekdays absent → default to {Sat, Sun} so existing records
+        # silently inherit the new weekly-pattern semantics on first load.
+        wd_raw = d.get("out_weekdays")
+        if wd_raw is None:
+            out_weekdays = set(_DEFAULT_OUT_WEEKDAYS)
+        else:
+            out_weekdays = {int(x) for x in wd_raw if isinstance(x, (int, str))}
+        return cls(
+            out_weekdays=out_weekdays,
+            out_dates=[date.fromisoformat(s) for s in d.get("out_dates", [])],
+            in_dates=[date.fromisoformat(s) for s in d.get("in_dates", [])],
+        )
 
 
 def load_availability(state: dict[str, Any]) -> dict[str, AvailabilityRecord]:
@@ -56,6 +85,7 @@ def load_availability(state: dict[str, Any]) -> dict[str, AvailabilityRecord]:
         rec = AvailabilityRecord.from_dict(entry)
         # Prune dates that have already passed.
         rec.out_dates = [d for d in rec.out_dates if d >= today]
+        rec.in_dates = [d for d in rec.in_dates if d >= today]
         out[name] = rec
     return out
 
@@ -84,10 +114,20 @@ def is_available(
     on_date: date,
     availability: dict[str, AvailabilityRecord],
 ) -> bool:
+    """Member's effective availability on a date.
+
+    Resolution: explicit `in_dates` override beats explicit `out_dates`
+    override beats the weekly `out_weekdays` pattern. A member with no
+    record at all defaults to the global default pattern (`{Sat, Sun}` out).
+    """
     rec = availability.get(member_name)
     if rec is None:
+        return on_date.weekday() not in _DEFAULT_OUT_WEEKDAYS
+    if on_date in rec.in_dates:
         return True
-    return on_date not in rec.out_dates
+    if on_date in rec.out_dates:
+        return False
+    return on_date.weekday() not in rec.out_weekdays
 
 
 def available_members_on(
@@ -166,11 +206,19 @@ def set_out(
     dates: list[date],
     availability: dict[str, AvailabilityRecord],
 ) -> None:
+    """Mark specific dates OUT.
+
+    Adds the dates to `out_dates` and removes them from `in_dates` so a
+    prior IN override doesn't fight the new OUT override.
+    """
     rec = availability.setdefault(name, AvailabilityRecord())
-    existing = set(rec.out_dates)
+    out_set = set(rec.out_dates)
+    in_set = set(rec.in_dates)
     for d in dates:
-        existing.add(d)
-    rec.out_dates = sorted(existing)
+        out_set.add(d)
+        in_set.discard(d)
+    rec.out_dates = sorted(out_set)
+    rec.in_dates = sorted(in_set)
 
 
 def set_in(
@@ -178,11 +226,35 @@ def set_in(
     dates: list[date],
     availability: dict[str, AvailabilityRecord],
 ) -> None:
-    rec = availability.get(name)
-    if rec is None:
-        return
-    drop = set(dates)
-    rec.out_dates = [d for d in rec.out_dates if d not in drop]
+    """Mark specific dates IN.
+
+    Adds the dates to `in_dates` (overrides a weekly-pattern OUT) AND
+    removes them from `out_dates` (clears any prior OUT override).
+    """
+    rec = availability.setdefault(name, AvailabilityRecord())
+    out_set = set(rec.out_dates)
+    in_set = set(rec.in_dates)
+    for d in dates:
+        out_set.discard(d)
+        in_set.add(d)
+    rec.out_dates = sorted(out_set)
+    rec.in_dates = sorted(in_set)
+
+
+def toggle_weekday(
+    name: str,
+    weekday: int,
+    availability: dict[str, AvailabilityRecord],
+) -> bool:
+    """Toggle the member's weekly OUT pattern for a weekday (Mon=0..Sun=6).
+    Returns True if the member is now OUT for that weekday, False if IN.
+    """
+    rec = availability.setdefault(name, AvailabilityRecord())
+    if weekday in rec.out_weekdays:
+        rec.out_weekdays.discard(weekday)
+        return False
+    rec.out_weekdays.add(weekday)
+    return True
 
 
 # --------------------------------------------------------------------------- #
