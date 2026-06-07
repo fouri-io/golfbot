@@ -259,10 +259,27 @@ Notifications paused through May 23.
 | `/resume` | admin | Re-enable notifications |
 | `/unbook` | admin | Roll back the most recent booking lock |
 | `/courses` | anyone | List watched courses |
+| `/garmin` | admin | Run the sibling **garmin-golf** update/deploy script and relay its one-line summary back to the group |
 | `/whoami` | anyone (DM) | Reply with the user's Telegram numeric ID (used once per member to populate `config.yaml`) |
 
 Per-notification buttons handle Yes/No/Maybe/Booked/Skip/Pause.
 No need for `/yes`/`/no`/`/book` text commands.
+
+### `/garmin` — external update hook
+
+A convenience hook unrelated to tee-time watching: it shells out to the
+[`garmin-golf`](../garmin-golf) project's `update.sh` (sync new rounds → AI
+coach → rebuild + deploy the golf dashboard) and echoes that script's final
+stdout line (a Telegram-friendly summary) back to the group.
+
+- **Admin-only**, since it triggers a deploy/push.
+- Runs off the bot's event loop (`asyncio.create_subprocess_exec`) with a
+  10-minute timeout; a placeholder message is edited in place with the result.
+- Script location: `GARMIN_UPDATE_SCRIPT` env var if set (absolute path),
+  else the default sibling path `../garmin-golf/update.sh` resolved relative to
+  this repo (so it's independent of the host user's home dir).
+- Assumes a home/residential host — `update.sh` notes Garmin rate-limits or
+  blocks datacenter IPs and needs a valid token cache + SSH key for the push.
 
 ---
 

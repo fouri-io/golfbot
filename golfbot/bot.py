@@ -14,6 +14,8 @@ See SPEC.md > Telegram commands.
 """
 from __future__ import annotations
 
+import logging
+import os
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
@@ -33,7 +35,28 @@ from golfbot import actions, notifier, store
 from golfbot.config import Config
 from golfbot.models import TeeTimeSlot
 
+log = logging.getLogger(__name__)
+
 _ADMIN_ACTIONS = {"book", "skip", "pause", "undo"}
+
+# Sibling project's update/deploy script, relayed by /garmin. Default is
+# resolved relative to this repo so it works regardless of the bot's launch cwd
+# or which user's home dir the tree lives under:
+#   .../dev/golfbot/golfbot/bot.py -> .../dev/garmin-golf/update.sh
+# Override with the GARMIN_UPDATE_SCRIPT env var (absolute path) when the two
+# projects aren't siblings.
+_DEFAULT_GARMIN_UPDATE_SCRIPT = (
+    Path(__file__).resolve().parent.parent.parent / "garmin-golf" / "update.sh"
+)
+
+
+def _garmin_script_path() -> Path:
+    """Path to the garmin-golf update script: GARMIN_UPDATE_SCRIPT env override
+    if set, else the sibling-project default."""
+    override = os.environ.get("GARMIN_UPDATE_SCRIPT", "").strip()
+    if override:
+        return Path(override).expanduser()
+    return _DEFAULT_GARMIN_UPDATE_SCRIPT
 
 
 @dataclass
@@ -106,6 +129,7 @@ def build_app(
     app.add_handler(CommandHandler("resume", cmd_resume))
     app.add_handler(CommandHandler("unbook", cmd_unbook))
     app.add_handler(CommandHandler("courses", cmd_courses))
+    app.add_handler(CommandHandler("garmin", cmd_garmin))
     app.add_handler(CommandHandler("whoami", cmd_whoami))
     # Booking callbacks (unified toggle, plus legacy cn/cx for old messages).
     app.add_handler(CallbackQueryHandler(cb_toggle, pattern=r"^tb:"))
@@ -149,6 +173,9 @@ _HELP_TEXT = (
     "Status\n"
     "/status    — current bookings, horizon, pause flag, last poll\n"
     "/courses   — list courses being scanned\n"
+    "\n"
+    "Garmin\n"
+    "/garmin    — sync rounds + deploy golf dashboard (admin)\n"
     "\n"
     "Notifications\n"
     "/pause     — mute auto-scan notifications\n"
@@ -692,6 +719,71 @@ async def cmd_courses(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     for c in ctx.cfg.courses:
         lines.append(f"• {c.display} (tier {c.tier})")
     await update.message.reply_text("\n".join(lines))
+
+
+async def cmd_garmin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin-only: run the sibling garmin-golf update/deploy script and relay
+    its one-line summary.
+
+    `../garmin-golf/update.sh` syncs new rounds, runs the AI coach, rebuilds +
+    deploys the dashboard, and prints a Telegram-friendly summary as its final
+    stdout line (everything verbose goes to its own log). We run it off the
+    event loop and echo back that last line (equivalent to `tail -1`).
+    """
+    import asyncio
+
+    if update.message is None or update.effective_user is None:
+        return
+    ctx = _ctx(context)
+    if not ctx.is_admin(update.effective_user.id):
+        await update.message.reply_text("Admin only.")
+        return
+
+    script = _garmin_script_path()
+    if not script.exists():
+        await update.message.reply_text(f"Update script not found: {script}")
+        return
+
+    caller = ctx.member_name_for(update.effective_user.id) or update.effective_user.id
+    log.info("garmin: update triggered by %s — running %s", caller, script)
+    placeholder = await update.message.reply_text("🔄 Running The Turn update…")
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            str(script),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout_b, stderr_b = await asyncio.wait_for(
+            proc.communicate(), timeout=600,
+        )
+    except TimeoutError:
+        log.warning("garmin: update timed out after 600s")
+        await placeholder.edit_text("⚠️ Garmin update timed out after 10 min.")
+        return
+    except Exception:
+        log.exception("garmin: failed to run update script")
+        await placeholder.edit_text("⚠️ Failed to run update — see bot logs.")
+        return
+
+    stdout = stdout_b.decode("utf-8", errors="replace")
+    lines = [ln for ln in stdout.splitlines() if ln.strip()]
+    if lines:
+        summary = lines[-1].strip()
+        log.info("garmin: update done (exit %s) — %s", proc.returncode, summary)
+    else:
+        # No stdout summary — surface stderr tail / exit code so failures
+        # aren't silent.
+        err = stderr_b.decode("utf-8", errors="replace").strip()
+        err_tail = err.splitlines()[-1] if err else ""
+        summary = (
+            f"⚠️ Update produced no summary (exit {proc.returncode})"
+            + (f": {err_tail}" if err_tail else "")
+        )
+        log.warning(
+            "garmin: update produced no stdout summary (exit %s); stderr tail: %s",
+            proc.returncode, err_tail or "(none)",
+        )
+    await placeholder.edit_text(summary)
 
 
 async def cmd_full(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
