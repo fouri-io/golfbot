@@ -17,7 +17,6 @@ from golfbot.config import resolve_telegram_secrets
 
 DATA_DIR = Path("data")
 STATE_PATH = DATA_DIR / "state.json"
-BOOKINGS_PATH = DATA_DIR / "bookings.jsonl"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -26,12 +25,11 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("run", help="Start Telegram listener (long-polling)")
 
-    mock = sub.add_parser("mock", help="Inject a synthetic tee time (P1 testing)")
+    mock = sub.add_parser("mock", help="Inject a synthetic Gold Star alert")
     mock.add_argument("--course", required=True, help="course key, e.g. roy_kizer")
     mock.add_argument("--date", required=True, help="YYYY-MM-DD")
     mock.add_argument("--time", required=True, help="HH:MM (24-hour)")
-    mock.add_argument("--players", type=int, default=4)
-    mock.add_argument("--grade", choices=["A", "B", "C"], default="A")
+    mock.add_argument("--spots", type=int, default=4, help="open spots to report")
 
     scrape = sub.add_parser("scrape", help="One-shot real scrape (P2)")
     scrape.add_argument(
@@ -45,8 +43,8 @@ def main(argv: list[str] | None = None) -> int:
     scrape.add_argument(
         "--players",
         type=int,
-        default=None,
-        help="override per-date min_players (default: derived from availability)",
+        default=1,
+        help="min open spots to query providers with (default: 1)",
     )
     scrape.add_argument(
         "--raw",
@@ -85,7 +83,6 @@ def _cmd_run() -> int:
     ctx = botmod.BotContext(
         cfg=cfg,
         state_path=STATE_PATH,
-        bookings_path=BOOKINGS_PATH,
         chat_id=chat_id,
     )
 
@@ -247,7 +244,7 @@ def _cmd_scrape(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
 
-    raw_players = args.players if args.players is not None else 3
+    raw_players = args.players
 
     if args.raw:
         # Raw mode bypasses the pipeline — we need the unfiltered RawSlot list.
@@ -265,29 +262,14 @@ def _cmd_scrape(args: argparse.Namespace) -> int:
         _print_raw(raw_slots, dates, raw_players)
         return 0
 
-    # Filtered preview: scope cfg.courses to the requested course (if any) and
-    # delegate to the same scanner.run_scan used by the scheduled job.
-    from golfbot import availability as avail_mod
-    from golfbot import scanner, store
+    # Gold Star preview: scope cfg.courses to the requested course (if any)
+    # and delegate to the same scanner.run_scan the scheduled job uses.
+    from golfbot import scanner
     scoped_cfg = cfg.model_copy(update={"courses": courses})
 
-    if args.players is not None:
-        # --players overrides the dynamic count for every date.
-        matches = asyncio.run(
-            scanner.run_scan(
-                scoped_cfg, providers, dates,
-                availability=None,
-                fallback_min_players=args.players,
-            )
-        )
-    else:
-        # Default: load availability from state and let scanner compute
-        # per-date min_players. Members without a real telegram_user_id
-        # are excluded — so if only Colby is registered, this queries with 1.
-        availability = avail_mod.load_availability(store.load_state(STATE_PATH))
-        matches = asyncio.run(
-            scanner.run_scan(scoped_cfg, providers, dates, availability=availability)
-        )
+    matches = asyncio.run(
+        scanner.run_scan(scoped_cfg, providers, dates, min_players=args.players)
+    )
 
     # We don't have the raw counts here (run_scan filters internally), but the
     # per-fetch logs already show them. Show the funnel summary using what we know.
@@ -365,17 +347,16 @@ def _cmd_mock(args: argparse.Namespace) -> int:
             course_key=args.course,
             tee_date=tee_date,
             tee_time=tee_time,
-            players=args.players,
-            grade=args.grade,
+            spots=args.spots,
         ))
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
 
     print(
-        f"Sent {args.grade}-grade mock tee time: "
+        f"Sent mock Gold Star: "
         f"{slot.course_key} {slot.tee_date} {slot.tee_time.strftime('%H:%M')} "
-        f"({slot.players_open} players). message_id={msg_id}"
+        f"({slot.spots_open} spots). message_id={msg_id}"
     )
     return 0
 

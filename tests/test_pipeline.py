@@ -137,8 +137,7 @@ def test_gold_star_slots_sets_course_display(cfg):
     out = gold_star_slots([_slot("roy_kizer")], cfg)
     assert len(out) == 1
     assert out[0].course_display == "Roy Kizer"
-    assert out[0].members_in == ()
-    assert out[0].members_out == ()
+    assert out[0].raw.course_key == "roy_kizer"
 
 
 def test_gold_star_slots_keeps_every_qualifying_time(cfg):

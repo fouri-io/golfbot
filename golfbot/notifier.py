@@ -1,14 +1,15 @@
-"""Telegram message rendering + send/edit.
+"""Telegram message rendering + send.
 
-The pure renderers (`render_*` and `build_keyboard_*`) take only what they
-need — slot, display strings, member names — and have no Telegram-runtime
-dependencies aside from `InlineKeyboardMarkup` types. The async wrappers
-at the bottom call the bot.
+The pure renderers (`render_*`) take only what they need — slot, display
+strings — and have no Telegram-runtime dependencies aside from
+`InlineKeyboardMarkup` types. The async wrappers at the bottom call the bot.
 
-Callback-data format: ``"{action}:{slot_id}"`` where action is one of
-``yes``, ``no``, ``book``, ``skip``, ``pause``, ``undo``.
+v2: there are no callback buttons. The only button anywhere is a URL button
+linking to the provider's booking page, which produces no callback data —
+voting, booking and tally rendering are gone
+(docs/decisions/0006-gold-star-pivot.md).
 
-See docs/SPEC.md > Notification mocks.
+See docs/SPEC.md > Notifications.
 """
 from __future__ import annotations
 
@@ -62,60 +63,19 @@ def _humanize_delta(delta_seconds: int) -> str:
 # --------------------------------------------------------------------------- #
 
 
-def render_open(slot: TeeTimeSlot, course_display: str, all_member_names: list[str]) -> str:
-    """Render an OPEN slot notification (initial or with running tally)."""
-    lines = [
-        f"🏌️ Tee Time Found — Grade {slot.grade}",
+def render_open(slot: TeeTimeSlot, course_display: str) -> str:
+    """Render a Gold Star alert.
+
+    Slice 4 rewrites this to the SPEC v2 format (randomized snark headline
+    + factual body + 🔗 Book it). For now it carries the v2 fields with no
+    vote tally.
+    """
+    return "\n".join([
+        "🎯 Gold Star",
         "",
         f"{course_display} · {_fmt_date(slot.tee_date)}",
-        f"{_fmt_time(slot.tee_time)} · {slot.players_open} players · {slot.holes} holes",
-        "",
-        "👥 Availability:",
-    ]
-    lines.extend(_format_tally(slot.votes, all_member_names))
-    return "\n".join(lines)
-
-
-def render_booked(
-    slot: TeeTimeSlot,
-    course_display: str,
-    booked_by: str,
-    booked_at: datetime,
-) -> str:
-    """Render the BOOKED state."""
-    yes_names = sorted(n for n, v in slot.votes.items() if v.vote == "yes")
-    no_names = sorted(n for n, v in slot.votes.items() if v.vote == "no")
-
-    lines = [
-        "🏌️ BOOKED ✅",
-        "",
-        f"{course_display} · {_fmt_date(slot.tee_date)}",
-        f"{_fmt_time(slot.tee_time)} · {slot.players_open} players · {slot.holes} holes",
-        "",
-        "👥 Final roster:",
-        f"✅ Yes: {', '.join(yes_names) if yes_names else '—'}",
-        f"❌ No:  {', '.join(no_names) if no_names else '—'}",
-        "",
-        f"Booked by {booked_by} at {_fmt_clock(booked_at)}",
-        f"Notifications paused through {_fmt_date(slot.tee_date)}.",
-    ]
-    return "\n".join(lines)
-
-
-def render_expired(slot: TeeTimeSlot, course_display: str) -> str:
-    """Render the auto-archived expired state."""
-    return (
-        f"⌛ Expired — {course_display} tee time was "
-        f"{_fmt_date(slot.tee_date)}, {_fmt_time(slot.tee_time)}"
-    )
-
-
-def render_skipped(slot: TeeTimeSlot, course_display: str) -> str:
-    """Render the admin-skipped state."""
-    return (
-        f"🚫 Skipped — {course_display} · "
-        f"{_fmt_date(slot.tee_date)}, {_fmt_time(slot.tee_time)}"
-    )
+        f"{_fmt_time(slot.tee_time)} · {slot.spots_open} spots open",
+    ])
 
 
 def render_status(state: dict, cfg: Config, today: date) -> str:
@@ -132,10 +92,7 @@ def render_status(state: dict, cfg: Config, today: date) -> str:
 
     days = ", ".join(d.capitalize()[:3] for d in cfg.search.days_of_week)
     premium = cfg.premium_window
-
-    from golfbot import bookings as bookings_mod
-    bookings = bookings_mod.load_bookings(state)
-    booking_summary = _bookings_summary(bookings) if bookings else _active_booking_summary(state)
+    all_star = ", ".join(c.display for c in cfg.all_star_courses())
     paused = bool(state.get("paused"))
 
     now = datetime.now(cfg.tz)
@@ -149,10 +106,10 @@ def render_status(state: dict, cfg: Config, today: date) -> str:
 
     lines = [
         f"📡 Watching: {course_names}",
+        f"⭐ All-star: {all_star}",
         f"🗓  Horizon: {_fmt_date(start)} → {_fmt_date(end)} ({cfg.search.horizon_days} days)",
         f"🎯 Days: {days}",
         f"⏰ Premium: {_fmt_time(premium.start)}–{_fmt_time(premium.end)}",
-        f"📌 Bookings: {booking_summary}",
     ]
     aw = cfg.polling.active_window
     if aw is not None:
@@ -260,68 +217,19 @@ def _stamp_line(label: str, iso_value: str | None, now: datetime, empty: str = "
     return f"{label}: {rel} ({_fmt_clock(when)})"
 
 
-def _bookings_summary(bookings: dict[date, dict]) -> str:
-    parts = []
-    for d in sorted(bookings.keys()):
-        b = bookings[d]
-        tee_time = time.fromisoformat(b["tee_time"])
-        parts.append(
-            f"{d.strftime('%a')} {d.month}/{d.day} {_fmt_time(tee_time)} {b['course_display']}"
-        )
-    return "; ".join(parts)
-
-
-def _active_booking_summary(state: dict) -> str:
-    """Find the most recent booked slot in state and summarize it.
-
-    Returns '— (none)' if there isn't one.
-    """
-    booked = [s for s in state.get("tee_times", []) if s.get("status") == "booked"]
-    if not booked:
-        return "— (none)"
-    s = booked[-1]
-    d = date.fromisoformat(s["tee_date"])
-    t = time.fromisoformat(s["tee_time"])
-    return f"{s['course_key']} · {_fmt_date(d)}, {_fmt_time(t)}"
-
-
-def _format_tally(votes: dict, all_member_names: list[str]) -> list[str]:
-    """The 'Availability' block."""
-    yes = sorted(n for n, v in votes.items() if v.vote == "yes")
-    no = sorted(n for n, v in votes.items() if v.vote == "no")
-    waiting = sorted(set(all_member_names) - set(votes.keys()))
-    return [
-        f"✅ Yes ({len(yes)}): {', '.join(yes) if yes else '—'}",
-        f"❌ No ({len(no)}):  {', '.join(no) if no else '—'}",
-        f"⏳ Waiting:   {', '.join(waiting) if waiting else '—'}",
-    ]
-
-
 # --------------------------------------------------------------------------- #
 # Keyboard builders                                                           #
 # --------------------------------------------------------------------------- #
 
 
 def build_keyboard_open(slot: TeeTimeSlot) -> InlineKeyboardMarkup:
-    """Three rows: URL link, vote buttons, admin action buttons."""
-    sid = slot.id
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔗 Open booking page", url=slot.booking_url)],
-        [
-            InlineKeyboardButton("✅ Yes", callback_data=f"yes:{sid}"),
-            InlineKeyboardButton("❌ No", callback_data=f"no:{sid}"),
-        ],
-        [
-            InlineKeyboardButton("📖 Booked it", callback_data=f"book:{sid}"),
-            InlineKeyboardButton("🚫 Skip", callback_data=f"skip:{sid}"),
-            InlineKeyboardButton("🔕 Pause", callback_data=f"pause:{sid}"),
-        ],
-    ])
+    """A single URL button — the only button v2 has anywhere.
 
-
-def build_keyboard_booked(slot: TeeTimeSlot) -> InlineKeyboardMarkup:
+    A URL button produces no callback data, which is why the bot registers
+    no callback handlers at all (docs/SPEC.md > Gold Star alert).
+    """
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("↩️ Undo", callback_data=f"undo:{slot.id}")],
+        [InlineKeyboardButton("🔗 Book it", url=slot.booking_url)],
     ])
 
 
@@ -335,74 +243,19 @@ async def send_new_slot(
     chat_id: int,
     slot: TeeTimeSlot,
     course_display: str,
-    all_member_names: list[str],
 ) -> int:
-    """Send the initial OPEN-state message. Returns the Telegram message_id."""
+    """Send a Gold Star alert. Returns the Telegram message_id.
+
+    Nothing edits this message afterwards — a re-alert is a fresh message.
+    """
     msg = await bot.send_message(
         chat_id=chat_id,
-        text=render_open(slot, course_display, all_member_names),
+        text=render_open(slot, course_display),
         reply_markup=build_keyboard_open(slot),
         parse_mode=ParseMode.HTML,
         disable_web_page_preview=True,
     )
     return msg.message_id
-
-
-async def update_tally(
-    bot: Bot,
-    chat_id: int,
-    slot: TeeTimeSlot,
-    course_display: str,
-    all_member_names: list[str],
-) -> None:
-    """Edit an OPEN-state message in place to reflect updated votes."""
-    assert slot.message_id is not None, "slot must have message_id to update"
-    await bot.edit_message_text(
-        chat_id=chat_id,
-        message_id=slot.message_id,
-        text=render_open(slot, course_display, all_member_names),
-        reply_markup=build_keyboard_open(slot),
-        parse_mode=ParseMode.HTML,
-        disable_web_page_preview=True,
-    )
-
-
-async def mark_booked(
-    bot: Bot,
-    chat_id: int,
-    slot: TeeTimeSlot,
-    course_display: str,
-    booked_by: str,
-    booked_at: datetime,
-) -> None:
-    """Edit the message into BOOKED form (keeps only the Undo button)."""
-    assert slot.message_id is not None
-    await bot.edit_message_text(
-        chat_id=chat_id,
-        message_id=slot.message_id,
-        text=render_booked(slot, course_display, booked_by, booked_at),
-        reply_markup=build_keyboard_booked(slot),
-        parse_mode=ParseMode.HTML,
-        disable_web_page_preview=True,
-    )
-
-
-async def mark_expired(
-    bot: Bot,
-    chat_id: int,
-    slot: TeeTimeSlot,
-    course_display: str,
-) -> None:
-    """Edit the message into the ⌛ Expired state. Strips all buttons."""
-    assert slot.message_id is not None
-    await bot.edit_message_text(
-        chat_id=chat_id,
-        message_id=slot.message_id,
-        text=render_expired(slot, course_display),
-        reply_markup=None,
-        parse_mode=ParseMode.HTML,
-        disable_web_page_preview=True,
-    )
 
 
 # --------------------------------------------------------------------------- #
@@ -415,52 +268,35 @@ def render_digest(
     run_at: datetime,
     next_run_at: datetime | None,
     cfg: Config,
-    bookings: dict[date, dict] | None = None,
     weather: dict[str, dict] | None = None,
 ) -> str:
-    """Telegram-HTML digest. Merged-list layout.
+    """Telegram-HTML listing of the current Gold Star matches.
 
-    The available matches AND existing bookings are surfaced as a single
-    keyboard list (in `build_digest_keyboard`) with status icons (✅/—)
-    inline on each row. The text portion shows only the title, counts,
-    and a per-date forecast block — no separate BOOKED section.
+    v2: no bookings overlay and no roster — the bot tracks neither.
     """
-    bookings = bookings or {}
     weather = weather or {}
     horizon = cfg.search.horizon_days
 
-    merged = _merge_rows_for_display(matches, bookings)
-
     title = f"🏌️ <b>Tee Times</b> — {_fmt_clock(run_at)}"
-
-    counts: list[str] = []
-    if bookings:
-        n = len(bookings)
-        counts.append(f"{n} booking{'s' if n != 1 else ''}")
-    n = len(merged)
-    counts.append(f"{n} slot{'s' if n != 1 else ''}")
-    subtitle = " · ".join(counts)
+    n = len(matches)
+    subtitle = f"{n} slot{'s' if n != 1 else ''}"
 
     sections: list[str] = [title, f"<i>{subtitle}</i>"]
 
-    if merged:
-        sorted_merged = sorted(merged, key=lambda x: (x["tee_date"], x["tee_time"]))
-        # Forecast block — one line per unique date, with weather + roster.
+    if matches:
+        sorted_matches = sorted(matches, key=lambda x: (x["tee_date"], x["tee_time"]))
+        sections.append("")
+        for m in sorted_matches:
+            sections.append(_render_digest_line(m))
+
         seen_dates: list[str] = []
-        roster_by_date: dict[str, tuple[list[str], list[str]]] = {}
-        for row in sorted_merged:
+        for row in sorted_matches:
             if row["tee_date"] not in seen_dates:
                 seen_dates.append(row["tee_date"])
-                roster_by_date[row["tee_date"]] = (
-                    row.get("members_in") or [],
-                    row.get("members_out") or [],
-                )
-
         sections.append("")
         sections.append("<b>📅 Forecast</b>")
         for d_iso in seen_dates:
-            members_in, members_out = roster_by_date[d_iso]
-            sections.append(_render_forecast_line(d_iso, weather, members_in, members_out))
+            sections.append(_render_forecast_line(d_iso, weather))
     else:
         sections.append("")
         sections.append(f"No matches in the next {horizon} days.")
@@ -469,52 +305,6 @@ def render_digest(
     sections.append("")
     sections.append(_render_footer(run_at, next_run_at))
     return "\n".join(sections)
-
-
-def _merge_rows_for_display(
-    matches: list[dict],
-    bookings: dict[date, dict],
-) -> list[dict]:
-    """Merge matches + bookings into a single deduped list.
-
-    When a slot exists in both `matches` and `bookings`, the booking
-    record wins — it has the authoritative committed roster (the booker
-    was forced into `members_in` at confirmation time).
-
-    Bookings whose slot isn't represented in the current scan still get
-    a ghost row — so the user always sees their bookings, even if the
-    provider stopped returning that slot.
-    """
-    by_key: dict[tuple, dict] = {}
-    for m in matches:
-        key = (m["course_key"], m["tee_date"], m["tee_time"])
-        by_key[key] = m
-    for _d, b in bookings.items():
-        key = (b["course_key"], b["tee_date"], b["tee_time"])
-        by_key[key] = b   # overlay — booking wins
-    return list(by_key.values())
-
-
-def _render_booking_v2(b: dict, weather: dict[str, dict], cfg: Config | None = None) -> str:
-    """e.g. '• Mon 5/18 ☀️ · 7:30 AM · Roy Kizer · Colby'"""
-    import html as _html
-    tee_date = date.fromisoformat(b["tee_date"])
-    tee_time = time.fromisoformat(b["tee_time"])
-    dow = tee_date.strftime("%a")
-    d = f"{tee_date.month}/{tee_date.day}"
-    w = weather.get(b["tee_date"])
-    emoji = _weather_emoji_from_dict(w)
-    course = _html.escape(_resolve_display(b, cfg))
-    roster = _format_roster(b.get("members_in") or [], b.get("members_out") or [])
-
-    parts = [f"<b>{dow} {d}</b>"]
-    if emoji:
-        parts.append(emoji)
-    parts.append(_fmt_time(tee_time))
-    parts.append(course)
-    if roster:
-        parts.append(roster)
-    return "• " + " · ".join(parts)
 
 
 def _resolve_display(d: dict, cfg: Config | None) -> str:
@@ -528,13 +318,8 @@ def _resolve_display(d: dict, cfg: Config | None) -> str:
     return d.get("course_display", "")
 
 
-def _render_forecast_line(
-    d_iso: str,
-    weather: dict[str, dict],
-    members_in: list[str],
-    members_out: list[str],
-) -> str:
-    """e.g. 'Wed 5/20  ⛅ 87°/66°  Rain 12%  ·  Colby+Steve (Ed out)'"""
+def _render_forecast_line(d_iso: str, weather: dict[str, dict]) -> str:
+    """e.g. 'Wed 5/20 · ⛅ 87°/66° · Rain 12%'"""
     d = date.fromisoformat(d_iso)
     dow = d.strftime("%a")
     date_str = f"{d.month}/{d.day}"
@@ -548,10 +333,6 @@ def _render_forecast_line(
         rain = int(w.get("rain_pct", 0))
         parts.append(f"{emoji} {tmax}°/{tmin}°")
         parts.append(f"Rain {rain}%")
-
-    roster = _format_roster(members_in, members_out)
-    if roster:
-        parts.append(roster)
     return " · ".join(parts)
 
 
@@ -562,143 +343,11 @@ def _weather_emoji_from_dict(w: dict | None) -> str:
     return emoji_for(w.get("code"))
 
 
-def _render_booking_line(b: dict) -> str:
-    """A single bullet in the BOOKED section."""
-    import html as _html
-    tee_date = date.fromisoformat(b["tee_date"])
-    tee_time = time.fromisoformat(b["tee_time"])
-    dow = tee_date.strftime("%a")
-    d = f"{tee_date.month}/{tee_date.day}"
-    course = _html.escape(b["course_display"])
-    roster = _format_roster(
-        b.get("members_in") or [],
-        b.get("members_out") or [],
-    )
-    line = f"• <b>{dow} {d}</b> · <b>{_fmt_time(tee_time)}</b> · <b>{course}</b>"
-    if roster:
-        line += f" · {roster}"
-    return line
-
-
-def build_digest_keyboard(
-    matches: list[dict],
-    bookings: dict[date, dict] | None = None,
-    cfg: Config | None = None,
-) -> "InlineKeyboardMarkup":
-    """Inline keyboard for the digest.
-
-    Layout:
-      • One full-width URL button per slot. Status emoji prefix (`✅` if
-        booked, `—` if not) carries the at-a-glance state indicator.
-      • Compact toggle grid at the bottom, 4 per row. Each button label
-        reflects the action it'll take: `✓ #N` to confirm an unbooked
-        slot, `↩️ #N` to cancel a booked one.
-      • Numbering and order match `render_digest` — sorted (date, time).
-    """
-    from golfbot import bookings as bookings_mod
-
-    bookings = bookings or {}
-    merged = _merge_rows_for_display(matches, bookings)
-    sorted_merged = sorted(merged, key=lambda x: (x["tee_date"], x["tee_time"]))
-
-    rows: list[list[InlineKeyboardButton]] = []
-
-    # URL info rows with status prefix.
-    for i, row in enumerate(sorted_merged, 1):
-        is_booked = bookings_mod.match_is_booked(row, bookings)
-        status = "✅" if is_booked else "—"
-        rows.append([
-            InlineKeyboardButton(
-                _row_button_text(i, row, status, cfg, is_booked=is_booked),
-                url=row["booking_url"],
-            ),
-        ])
-
-    # Compact toggle grid.
-    if sorted_merged:
-        toggle_btns: list[InlineKeyboardButton] = []
-        for i, row in enumerate(sorted_merged, 1):
-            hhmm = row["tee_time"].replace(":", "")[:4]
-            is_booked = bookings_mod.match_is_booked(row, bookings)
-            label = f"↩️ #{i}" if is_booked else f"✓ #{i}"
-            toggle_btns.append(InlineKeyboardButton(
-                label,
-                callback_data=f"tb:{row['course_key']}:{row['tee_date']}:{hhmm}",
-            ))
-        per_row = 4
-        for j in range(0, len(toggle_btns), per_row):
-            rows.append(toggle_btns[j:j + per_row])
-
-    return InlineKeyboardMarkup(rows)
-
-
-def _row_button_text(
-    idx: int,
-    row: dict,
-    status: str,
-    cfg: Config | None = None,
-    is_booked: bool = False,
-) -> str:
-    """e.g. '— 2. Wed Jimmy Clay 7:30A · 3 open · $25' for unbooked,
-    or '✅ 1. Mon Roy Kizer 7:30A · Colby+Steve · $25' for booked.
-
-    The "3 open" segment is replaced with the committed roster on booked
-    rows — slot count is moot once you've claimed the slot, but who's
-    going matters.
-    """
-    tee_date = date.fromisoformat(row["tee_date"])
-    tee_time = time.fromisoformat(row["tee_time"])
-    dow = tee_date.strftime("%a")
-    parts = [
-        f"{status} {idx}.",
-        dow,
-        _resolve_display(row, cfg),
-        _short_time(tee_time),
-    ]
-    if is_booked:
-        roster = "+".join(row.get("members_in") or [])
-        if roster:
-            parts.append(f"· {roster}")
-    else:
-        parts.append(f"· {row['players_available']} open")
-    price = row.get("price_usd")
-    if price:
-        parts.append(f"· ${int(round(float(price)))}")
-    return " ".join(parts)
-
-
 def _short_time(t: time) -> str:
     """Compact AM/PM, e.g. '7:30A' or '12:30P'. Saves chars on buttons."""
     h = t.hour % 12 or 12
     am_pm = "A" if t.hour < 12 else "P"
     return f"{h}:{t.minute:02d}{am_pm}"
-
-
-def _booking_button_text(b: dict, cfg: Config | None = None) -> str:
-    """e.g. '📌 Mon 5/18 7:30A Roy Kizer'."""
-    tee_date = date.fromisoformat(b["tee_date"])
-    tee_time = time.fromisoformat(b["tee_time"])
-    dow = tee_date.strftime("%a")
-    d = f"{tee_date.month}/{tee_date.day}"
-    return f"📌 {dow} {d} {_short_time(tee_time)} {_resolve_display(b, cfg)}"
-
-
-def _match_button_text(idx: int, m: dict, cfg: Config | None = None) -> str:
-    """e.g. '1. Wed Riverside 7:30A · 3 open · $45'."""
-    tee_date = date.fromisoformat(m["tee_date"])
-    tee_time = time.fromisoformat(m["tee_time"])
-    dow = tee_date.strftime("%a")
-    parts = [
-        f"{idx}.",
-        dow,
-        _resolve_display(m, cfg),
-        _short_time(tee_time),
-        f"· {m['players_available']} open",
-    ]
-    price = m.get("price_usd")
-    if price:
-        parts.append(f"· ${int(round(float(price)))}")
-    return " ".join(parts)
 
 
 def _render_digest_line(m: dict) -> str:
@@ -726,23 +375,10 @@ def _render_digest_line(m: dict) -> str:
         course,
         f"{players} open",
     ]
-    roster_str = _format_roster(m.get("members_in") or [], m.get("members_out") or [])
-    if roster_str:
-        parts.append(roster_str)
     if price_str:
         parts.append(price_str)
     parts.append(f'<a href="{_html.escape(m["booking_url"], quote=True)}">book</a>')
     return " · ".join(parts)
-
-
-def _format_roster(members_in: list[str], members_out: list[str]) -> str:
-    """e.g. 'Colby+Ed (Steve out)' or 'Colby' or ''."""
-    if not members_in and not members_out:
-        return ""
-    in_part = "+".join(members_in) if members_in else "—"
-    if members_out:
-        return f"{in_part} ({', '.join(members_out)} out)"
-    return in_part
 
 
 def _render_footer(run_at: datetime, next_run_at: datetime | None) -> str:
@@ -752,8 +388,8 @@ def _render_footer(run_at: datetime, next_run_at: datetime | None) -> str:
     if next_run_at:
         next_delta = int((now - next_run_at).total_seconds())
         nxt = _humanize_delta(next_delta)
-        return f"<i>Last scan: {last} · Next: {nxt}</i>  ·  /tee · /pause · /help"
-    return f"<i>Last scan: {last}</i>  ·  /tee · /pause · /help"
+        return f"<i>Last scan: {last} · Next: {nxt}</i>  ·  /full · /pause · /help"
+    return f"<i>Last scan: {last}</i>  ·  /full · /pause · /help"
 
 
 async def send_digest(
@@ -763,36 +399,16 @@ async def send_digest(
     run_at: datetime,
     next_run_at: datetime | None,
     cfg: Config,
-    bookings: dict[date, dict] | None = None,
     weather: dict[str, dict] | None = None,
 ) -> int:
-    """Send the digest message; return Telegram message_id."""
+    """Send the digest message; return Telegram message_id.
+
+    No keyboard — the per-row booking links live in the message text.
+    """
     msg = await bot.send_message(
         chat_id=chat_id,
-        text=render_digest(
-            matches, run_at, next_run_at, cfg,
-            bookings=bookings, weather=weather,
-        ),
-        reply_markup=build_digest_keyboard(matches, bookings, cfg=cfg),
+        text=render_digest(matches, run_at, next_run_at, cfg, weather=weather),
         parse_mode=ParseMode.HTML,
         disable_web_page_preview=True,
     )
     return msg.message_id
-
-
-async def mark_skipped_msg(
-    bot: Bot,
-    chat_id: int,
-    slot: TeeTimeSlot,
-    course_display: str,
-) -> None:
-    """Edit the message into the 🚫 Skipped state. Strips all buttons."""
-    assert slot.message_id is not None
-    await bot.edit_message_text(
-        chat_id=chat_id,
-        message_id=slot.message_id,
-        text=render_skipped(slot, course_display),
-        reply_markup=None,
-        parse_mode=ParseMode.HTML,
-        disable_web_page_preview=True,
-    )

@@ -1,220 +1,174 @@
-"""Tests for golfbot.actions (pure state mutations)."""
+"""Tests for golfbot.actions — the Gold Star dedup + re-alert ledger."""
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 
 import pytest
 
 from golfbot import actions
-from golfbot.store import default_state
+from golfbot.actions import SlotNotFound
 
-NOW = datetime(2026, 5, 15, 17, 0)
+NOW = datetime.fromisoformat("2026-05-15T17:00:00-05:00")
+LATER = datetime.fromisoformat("2026-05-15T18:00:00-05:00")
 
 
-def _make_slot(slot_id: str = "roy_kizer:2026-05-23:0800:4", status: str = "open") -> dict:
-    return {
+def _state(*slots) -> dict:
+    return {"paused": False, "pause_started_at": None, "tee_times": list(slots)}
+
+
+def _slot(slot_id="jimmy_clay:2026-05-22:0740", spots=3, tee_date="2026-05-22", **kw):
+    d = {
         "id": slot_id,
-        "course_key": "roy_kizer",
-        "tee_date": "2026-05-23",
-        "tee_time": "08:00:00",
-        "players_open": 4,
+        "course_key": slot_id.split(":")[0],
+        "tee_date": tee_date,
+        "tee_time": "07:40:00",
+        "spots_open": spots,
         "holes": 18,
-        "grade": "A",
         "booking_url": "https://example.com/book",
-        "first_seen_at": "2026-05-15T17:00:00",
-        "last_seen_at": "2026-05-15T17:00:00",
-        "status": status,
-        "message_id": None,
-        "votes": {},
+        "first_seen_at": NOW.isoformat(),
+        "last_seen_at": NOW.isoformat(),
+        "last_alerted_spots": None,
+        "last_alerted_at": None,
     }
+    d.update(kw)
+    return d
 
 
-# ---------- find_slot / find_slot_by_message ----------
+# ---------- find_slot ----------
 
 
-def test_find_slot_returns_existing():
-    state = default_state()
-    slot = _make_slot()
-    state["tee_times"].append(slot)
-    assert actions.find_slot(state, slot["id"]) is slot
+def test_find_slot_returns_match():
+    s = _slot()
+    assert actions.find_slot(_state(s), s["id"]) is s
 
 
 def test_find_slot_raises_when_missing():
-    state = default_state()
-    with pytest.raises(actions.SlotNotFound):
-        actions.find_slot(state, "missing")
-
-
-def test_find_slot_by_message():
-    state = default_state()
-    s = _make_slot()
-    s["message_id"] = 42
-    state["tee_times"].append(s)
-    assert actions.find_slot_by_message(state, 42) is s
-    assert actions.find_slot_by_message(state, 99) is None
+    with pytest.raises(SlotNotFound):
+        actions.find_slot(_state(), "nope:2026-05-22:0740")
 
 
 # ---------- upsert_slot ----------
 
 
 def test_upsert_adds_new_slot():
-    state = default_state()
-    slot = _make_slot()
-    result, is_new = actions.upsert_slot(state, slot, NOW)
+    state = _state()
+    slot, is_new = actions.upsert_slot(state, _slot(), NOW)
     assert is_new is True
-    assert result is slot
-    assert state["tee_times"] == [slot]
-
-
-def test_upsert_refreshes_existing_last_seen():
-    state = default_state()
-    slot = _make_slot()
-    state["tee_times"].append(slot)
-    later = datetime(2026, 5, 15, 18, 30)
-
-    new_input = _make_slot()
-    result, is_new = actions.upsert_slot(state, new_input, later)
-    assert is_new is False
-    assert result is slot  # the existing dict, not the new one
-    assert slot["last_seen_at"] == later.isoformat()
     assert len(state["tee_times"]) == 1
+    assert slot["id"] == "jimmy_clay:2026-05-22:0740"
 
 
-# ---------- record_vote ----------
+def test_upsert_existing_refreshes_without_duplicating():
+    state = _state(_slot(spots=2))
+    incoming = _slot(spots=4)
+    slot, is_new = actions.upsert_slot(state, incoming, LATER)
+    assert is_new is False
+    assert len(state["tee_times"]) == 1
+    assert slot["spots_open"] == 4
+    assert slot["last_seen_at"] == LATER.isoformat()
 
 
-def test_record_vote_yes():
-    state = default_state()
-    state["tee_times"].append(_make_slot())
-    slot = actions.record_vote(state, _make_slot()["id"], "Colby", "yes", NOW)
-    assert slot["votes"]["Colby"] == {"vote": "yes", "voted_at": NOW.isoformat()}
+def test_upsert_preserves_first_seen_and_alert_history():
+    state = _state(_slot(spots=2, last_alerted_spots=2, last_alerted_at=NOW.isoformat()))
+    slot, _ = actions.upsert_slot(state, _slot(spots=3), LATER)
+    assert slot["first_seen_at"] == NOW.isoformat()
+    assert slot["last_alerted_spots"] == 2
+    assert slot["last_alerted_at"] == NOW.isoformat()
 
 
-def test_record_vote_replaces_prior_vote():
-    state = default_state()
-    state["tee_times"].append(_make_slot())
-    sid = _make_slot()["id"]
-    actions.record_vote(state, sid, "Colby", "yes", NOW)
-    later = datetime(2026, 5, 15, 17, 30)
-    actions.record_vote(state, sid, "Colby", "no", later)
-    slot = actions.find_slot(state, sid)
-    assert slot["votes"]["Colby"]["vote"] == "no"
-    assert slot["votes"]["Colby"]["voted_at"] == later.isoformat()
+def test_upsert_distinct_ids_coexist():
+    state = _state()
+    actions.upsert_slot(state, _slot("jimmy_clay:2026-05-22:0740"), NOW)
+    actions.upsert_slot(state, _slot("roy_kizer:2026-05-22:0740"), NOW)
+    assert len(state["tee_times"]) == 2
 
 
-def test_record_vote_rejects_invalid_value():
-    state = default_state()
-    state["tee_times"].append(_make_slot())
-    with pytest.raises(actions.ActionError, match="invalid vote"):
-        actions.record_vote(state, _make_slot()["id"], "Colby", "maybe", NOW)
+# ---------- should_alert / record_alert (docs/SPEC.md > Re-alert semantics) ----
 
 
-def test_record_vote_rejects_non_open_slot():
-    state = default_state()
-    state["tee_times"].append(_make_slot(status="booked"))
-    with pytest.raises(actions.ActionError, match="cannot vote"):
-        actions.record_vote(state, _make_slot()["id"], "Colby", "yes", NOW)
+def test_alerts_first_time_seen():
+    assert actions.should_alert(_slot(spots=1)) is True
 
 
-# ---------- mark_booked ----------
+def test_realerts_when_more_spots_open():
+    assert actions.should_alert(_slot(spots=3, last_alerted_spots=2)) is True
 
 
-def test_mark_booked_sets_status_and_booking():
-    state = default_state()
-    state["tee_times"].append(_make_slot())
-    slot, booking = actions.mark_booked(state, _make_slot()["id"], "Colby", NOW)
-    assert slot["status"] == "booked"
-    assert slot["booked_by"] == "Colby"
-    assert slot["booked_at"] == NOW.isoformat()
-    assert booking["booked_by"] == "Colby"
-    assert booking["tee_date"] == "2026-05-23"
-    assert booking["undone_at"] is None
-    # No longer touches horizon_override_until (dead state field).
-    assert "horizon_override_until" not in state
+def test_silent_when_spot_count_unchanged():
+    assert actions.should_alert(_slot(spots=3, last_alerted_spots=3)) is False
 
 
-def test_mark_booked_captures_roster():
-    state = default_state()
-    state["tee_times"].append(_make_slot())
-    sid = _make_slot()["id"]
-    actions.record_vote(state, sid, "Colby", "yes", NOW)
-    actions.record_vote(state, sid, "Steve", "yes", NOW)
-    actions.record_vote(state, sid, "Ed", "no", NOW)
-
-    _, booking = actions.mark_booked(state, sid, "Colby", NOW)
-    assert booking["roster"] == {"yes": ["Colby", "Steve"], "no": ["Ed"]}
+def test_silent_when_fewer_spots():
+    """Someone took a seat — a worse opportunity, not worth a ping."""
+    assert actions.should_alert(_slot(spots=1, last_alerted_spots=3)) is False
 
 
-def test_mark_booked_rejects_already_booked():
-    state = default_state()
-    state["tee_times"].append(_make_slot(status="booked"))
-    with pytest.raises(actions.ActionError, match="cannot book"):
-        actions.mark_booked(state, _make_slot()["id"], "Colby", NOW)
+def test_record_alert_stamps_current_count():
+    slot = _slot(spots=3)
+    actions.record_alert(slot, NOW)
+    assert slot["last_alerted_spots"] == 3
+    assert slot["last_alerted_at"] == NOW.isoformat()
 
 
-# ---------- mark_skipped ----------
+def test_alert_cycle_goes_quiet_after_recording():
+    slot = _slot(spots=3)
+    assert actions.should_alert(slot) is True
+    actions.record_alert(slot, NOW)
+    assert actions.should_alert(slot) is False
+
+    # Spots increase -> alert again, then quiet again at the new level.
+    slot["spots_open"] = 4
+    assert actions.should_alert(slot) is True
+    actions.record_alert(slot, LATER)
+    assert actions.should_alert(slot) is False
 
 
-def test_mark_skipped():
-    state = default_state()
-    state["tee_times"].append(_make_slot())
-    slot = actions.mark_skipped(state, _make_slot()["id"])
-    assert slot["status"] == "skipped"
+# ---------- prune_past_slots ----------
 
 
-def test_mark_skipped_rejects_non_open():
-    state = default_state()
-    state["tee_times"].append(_make_slot(status="booked"))
-    with pytest.raises(actions.ActionError, match="cannot skip"):
-        actions.mark_skipped(state, _make_slot()["id"])
+def test_prune_drops_only_past_dates():
+    state = _state(
+        _slot("a:2026-05-20:0740", tee_date="2026-05-20"),
+        _slot("b:2026-05-22:0740", tee_date="2026-05-22"),
+        _slot("c:2026-05-25:0740", tee_date="2026-05-25"),
+    )
+    removed = actions.prune_past_slots(state, date(2026, 5, 22))
+    assert removed == 1
+    assert [s["id"] for s in state["tee_times"]] == [
+        "b:2026-05-22:0740", "c:2026-05-25:0740",
+    ]
+
+
+def test_prune_keeps_today():
+    state = _state(_slot("a:2026-05-22:0740", tee_date="2026-05-22"))
+    assert actions.prune_past_slots(state, date(2026, 5, 22)) == 0
+
+
+def test_prune_empty_ledger():
+    state = _state()
+    assert actions.prune_past_slots(state, date(2026, 5, 22)) == 0
 
 
 # ---------- set_paused ----------
 
 
-def test_set_paused_true_records_timestamp():
-    state = default_state()
+def test_set_paused_records_start_time():
+    state = _state()
     actions.set_paused(state, True, NOW)
     assert state["paused"] is True
     assert state["pause_started_at"] == NOW.isoformat()
 
 
-def test_set_paused_idempotent_preserves_original_timestamp():
-    state = default_state()
+def test_repausing_preserves_original_timestamp():
+    state = _state()
     actions.set_paused(state, True, NOW)
-    later = datetime(2026, 5, 15, 18, 0)
-    actions.set_paused(state, True, later)
+    actions.set_paused(state, True, LATER)
     assert state["pause_started_at"] == NOW.isoformat()
 
 
-def test_set_paused_false_clears_timestamp():
-    state = default_state()
+def test_resume_clears_timestamp():
+    state = _state()
     actions.set_paused(state, True, NOW)
     actions.set_paused(state, False, None)
     assert state["paused"] is False
     assert state["pause_started_at"] is None
-
-
-# ---------- undo_booking ----------
-
-
-def test_undo_booking_reverts_status():
-    state = default_state()
-    state["tee_times"].append(_make_slot())
-    sid = _make_slot()["id"]
-    actions.mark_booked(state, sid, "Colby", NOW)
-
-    later = datetime(2026, 5, 15, 18, 0)
-    slot, undo = actions.undo_booking(state, sid, later)
-    assert slot["status"] == "open"
-    assert "booked_by" not in slot
-    assert "booked_at" not in slot
-    assert undo["undone_at"] == later.isoformat()
-    assert undo["tee_date"] == "2026-05-23"
-
-
-def test_undo_booking_rejects_non_booked():
-    state = default_state()
-    state["tee_times"].append(_make_slot())
-    with pytest.raises(actions.ActionError, match="cannot undo"):
-        actions.undo_booking(state, _make_slot()["id"], NOW)

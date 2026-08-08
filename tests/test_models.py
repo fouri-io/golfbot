@@ -1,99 +1,93 @@
-"""Tests for golfbot.models (dataclass <-> dict round-trips)."""
+"""Tests for golfbot.models."""
 from __future__ import annotations
 
 from datetime import date, datetime, time
 
-from golfbot.models import Booking, TeeTimeSlot, Vote, make_slot_id
+from golfbot.models import TeeTimeSlot, make_slot_id
+
+# ---------- make_slot_id ----------
 
 
-def test_make_slot_id():
-    sid = make_slot_id("roy_kizer", date(2026, 5, 23), time(8, 0), 4)
-    assert sid == "roy_kizer:2026-05-23:0800:4"
+def test_make_slot_id_shape():
+    assert make_slot_id("roy_kizer", date(2026, 5, 23), time(8, 0)) == (
+        "roy_kizer:2026-05-23:0800"
+    )
 
 
-def test_make_slot_id_pads_hours():
-    sid = make_slot_id("lions", date(2026, 5, 23), time(7, 5), 2)
-    assert sid == "lions:2026-05-23:0705:2"
+def test_make_slot_id_is_deterministic():
+    a = make_slot_id("jimmy_clay", date(2026, 5, 22), time(7, 40))
+    b = make_slot_id("jimmy_clay", date(2026, 5, 22), time(7, 40))
+    assert a == b
 
 
-def test_vote_roundtrip():
-    v = Vote(vote="yes", voted_at=datetime(2026, 5, 15, 17, 2))
-    d = v.to_dict()
-    assert d == {"vote": "yes", "voted_at": "2026-05-15T17:02:00"}
-    assert Vote.from_dict(d) == v
+def test_slot_id_excludes_spot_count():
+    """docs/SPEC.md > Re-alert semantics: a slot is one record across polls
+    regardless of how many spots are open, so the id must not encode them."""
+    slot_2 = _slot(spots=2)
+    slot_4 = _slot(spots=4)
+    assert slot_2.id == slot_4.id
 
 
-def test_tee_time_slot_roundtrip():
-    slot = TeeTimeSlot(
-        id="roy_kizer:2026-05-23:0800:4",
-        course_key="roy_kizer",
-        tee_date=date(2026, 5, 23),
-        tee_time=time(8, 0),
-        players_open=4,
+def test_make_slot_id_distinguishes_time_and_date():
+    base = make_slot_id("lions", date(2026, 5, 22), time(7, 40))
+    assert base != make_slot_id("lions", date(2026, 5, 22), time(7, 50))
+    assert base != make_slot_id("lions", date(2026, 5, 23), time(7, 40))
+    assert base != make_slot_id("roy_kizer", date(2026, 5, 22), time(7, 40))
+
+
+# ---------- TeeTimeSlot ----------
+
+
+NOW = datetime.fromisoformat("2026-05-15T17:00:00-05:00")
+
+
+def _slot(spots: int = 3, **kw) -> TeeTimeSlot:
+    d = date(2026, 5, 22)
+    t = time(7, 40)
+    defaults = dict(
+        id=make_slot_id("jimmy_clay", d, t),
+        course_key="jimmy_clay",
+        tee_date=d,
+        tee_time=t,
+        spots_open=spots,
         holes=18,
-        grade="A",
-        booking_url="https://example.com",
-        first_seen_at=datetime(2026, 5, 15, 17, 0),
-        last_seen_at=datetime(2026, 5, 15, 18, 0),
-        status="open",
-        message_id=4421,
-        votes={"Colby": Vote(vote="yes", voted_at=datetime(2026, 5, 15, 17, 2))},
+        booking_url="https://example.com/book",
+        first_seen_at=NOW,
+        last_seen_at=NOW,
     )
-    d = slot.to_dict()
-    assert d["tee_date"] == "2026-05-23"
-    assert d["tee_time"] == "08:00:00"
-    assert d["message_id"] == 4421
-    assert d["votes"]["Colby"]["vote"] == "yes"
-    assert TeeTimeSlot.from_dict(d) == slot
+    defaults.update(kw)
+    return TeeTimeSlot(**defaults)   # type: ignore[arg-type]
 
 
-def test_tee_time_slot_default_votes_and_message_id():
-    slot = TeeTimeSlot(
-        id="x",
-        course_key="lions",
-        tee_date=date(2026, 5, 24),
-        tee_time=time(7, 30),
-        players_open=2,
-        holes=18,
-        grade="B",
-        booking_url="https://example.com",
-        first_seen_at=datetime(2026, 5, 15, 17, 0),
-        last_seen_at=datetime(2026, 5, 15, 17, 0),
-        status="open",
-    )
-    d = slot.to_dict()
-    assert d["message_id"] is None
-    assert d["votes"] == {}
-    assert TeeTimeSlot.from_dict(d) == slot
+def test_roundtrip_is_lossless():
+    slot = _slot()
+    assert TeeTimeSlot.from_dict(slot.to_dict()) == slot
 
 
-def test_booking_roundtrip():
-    b = Booking(
-        booked_at=datetime(2026, 5, 15, 14, 14),
-        booked_by="Colby",
-        course_key="roy_kizer",
-        tee_date=date(2026, 5, 23),
-        tee_time=time(8, 0),
-        players=4,
-        roster={"yes": ["Colby", "Steve"], "no": ["Ed"]},
-    )
-    d = b.to_dict()
-    assert d["undone_at"] is None
-    assert d["tee_date"] == "2026-05-23"
-    assert Booking.from_dict(d) == b
+def test_roundtrip_with_alert_bookkeeping():
+    slot = _slot(last_alerted_spots=2, last_alerted_at=NOW)
+    restored = TeeTimeSlot.from_dict(slot.to_dict())
+    assert restored == slot
+    assert restored.last_alerted_spots == 2
+    assert restored.last_alerted_at == NOW
 
 
-def test_booking_with_undo():
-    b = Booking(
-        booked_at=datetime(2026, 5, 15, 14, 14),
-        booked_by="Colby",
-        course_key="roy_kizer",
-        tee_date=date(2026, 5, 23),
-        tee_time=time(8, 0),
-        players=4,
-        roster={"yes": ["Colby"], "no": []},
-        undone_at=datetime(2026, 5, 15, 15, 0),
-    )
-    d = b.to_dict()
-    assert d["undone_at"] == "2026-05-15T15:00:00"
-    assert Booking.from_dict(d) == b
+def test_never_alerted_defaults_to_none():
+    slot = _slot()
+    assert slot.last_alerted_spots is None
+    assert slot.last_alerted_at is None
+    assert TeeTimeSlot.from_dict(slot.to_dict()).last_alerted_at is None
+
+
+def test_to_dict_serializes_dates_as_iso_strings():
+    d = _slot().to_dict()
+    assert d["tee_date"] == "2026-05-22"
+    assert d["tee_time"] == "07:40:00"
+    assert d["first_seen_at"] == NOW.isoformat()
+
+
+def test_to_dict_has_no_v1_keys():
+    """Votes, grades, booking and message state are gone in v2."""
+    d = _slot().to_dict()
+    for gone in ("votes", "grade", "status", "message_id", "players_open"):
+        assert gone not in d

@@ -1,7 +1,10 @@
 """Flat-file persistence.
 
-- state.json     — live state, rewritten atomically on every change.
-- bookings.jsonl — append-only booking history.
+- state.json — live state, rewritten atomically on every change.
+
+v2: `bookings.jsonl` is no longer written. Booking happens offline, so the
+bot records none of it. An existing file is left on disk as history;
+nothing appends to it (docs/SPEC.md > Data model).
 
 We operate at the dict level here; conversion to/from dataclasses
 (`TeeTimeSlot` etc.) belongs to the caller. datetime/date/time values are
@@ -74,29 +77,3 @@ async def save_state(path: Path | str, state: dict[str, Any]) -> None:
         os.replace(tmp, p)
 
 
-def append_booking(path: Path | str, booking: dict[str, Any]) -> None:
-    """Append one JSON object as a line to bookings.jsonl.
-
-    POSIX guarantees that single writes under PIPE_BUF (4096 bytes) to a
-    file opened in append mode are atomic, so no lock is needed for
-    individual lines.
-    """
-    p = Path(path)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    line = json.dumps(booking, default=_json_default) + "\n"
-    with p.open("a", encoding="utf-8") as f:
-        f.write(line)
-
-
-def read_bookings(path: Path | str) -> list[dict[str, Any]]:
-    """Read all booking lines. Returns [] if the file is missing."""
-    p = Path(path)
-    if not p.exists():
-        return []
-    out: list[dict[str, Any]] = []
-    with p.open(encoding="utf-8") as f:
-        for line in f:
-            stripped = line.strip()
-            if stripped:
-                out.append(json.loads(stripped))
-    return out

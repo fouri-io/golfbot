@@ -106,9 +106,6 @@ class Member(BaseModel):
 class Group(BaseModel):
     admin: str
     members: list[Member] = Field(min_length=1)
-    # Availability-layer flag. Slice 3 deletes the availability layer and this
-    # field with it; kept here so `availability.py` still loads until then.
-    admin_required: bool = False
 
     @model_validator(mode="after")
     def _admin_in_members(self) -> Group:

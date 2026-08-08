@@ -1,23 +1,25 @@
-"""Pure state mutations.
+"""Pure state mutations — the Gold Star dedup + re-alert ledger.
 
-Take a `state` dict + inputs, mutate it in place, return either nothing or a
-side-effect record (a booking line, an undo record). No I/O, no Telegram
-calls — the caller (bot.py / mock_source.py) handles persistence and
-external effects.
+Take a `state` dict + inputs, mutate it in place, return what the caller
+needs. No I/O, no Telegram calls — the caller (bot.py / mock_source.py)
+handles persistence and external effects.
 
 Slots inside `state["tee_times"]` are stored as their dict form
 (`TeeTimeSlot.to_dict()`). This module operates at the dict level so it
-doesn't depend on the dataclass beyond ID construction.
+doesn't depend on the dataclass.
+
+v2: voting, booking, and skip actions are gone (the group does all of that
+offline). What remains is the ledger that decides whether a qualifying slot
+is worth alerting about — see docs/SPEC.md > Re-alert semantics.
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
 
 class ActionError(Exception):
-    """Caller-visible error: tried to do something invalid (skip a booked
-    slot, vote on an expired slot, undo without an active booking, ...)."""
+    """Caller-visible error: tried to do something invalid."""
 
 
 class SlotNotFound(ActionError):
@@ -38,16 +40,8 @@ def find_slot(state: dict[str, Any], slot_id: str) -> dict[str, Any]:
     raise SlotNotFound(slot_id)
 
 
-def find_slot_by_message(state: dict[str, Any], message_id: int) -> dict[str, Any] | None:
-    """Return the slot whose Telegram message_id matches, or None."""
-    for s in state["tee_times"]:
-        if s.get("message_id") == message_id:
-            return s
-    return None
-
-
 # --------------------------------------------------------------------------- #
-# Mutations                                                                    #
+# The re-alert ledger                                                          #
 # --------------------------------------------------------------------------- #
 
 
@@ -56,83 +50,58 @@ def upsert_slot(
     slot_dict: dict[str, Any],
     now: datetime,
 ) -> tuple[dict[str, Any], bool]:
-    """Add a slot if id is new, or refresh last_seen_at on an existing slot.
+    """Add a slot if its id is new, or refresh an existing one in place.
+
+    Refreshing updates `last_seen_at` and `spots_open` but preserves
+    `first_seen_at` and the alert bookkeeping.
 
     Returns (slot_in_state, is_new).
     """
     for existing in state["tee_times"]:
         if existing["id"] == slot_dict["id"]:
             existing["last_seen_at"] = now.isoformat()
+            existing["spots_open"] = slot_dict["spots_open"]
+            existing["booking_url"] = slot_dict["booking_url"]
             return existing, False
     state["tee_times"].append(slot_dict)
     return slot_dict, True
 
 
-def attach_message_id(
-    state: dict[str, Any],
-    slot_id: str,
-    message_id: int,
-) -> dict[str, Any]:
-    slot = find_slot(state, slot_id)
-    slot["message_id"] = message_id
-    return slot
+def should_alert(slot: dict[str, Any]) -> bool:
+    """Whether this slot warrants a push right now.
 
-
-def record_vote(
-    state: dict[str, Any],
-    slot_id: str,
-    member_name: str,
-    vote: str,
-    now: datetime,
-) -> dict[str, Any]:
-    if vote not in {"yes", "no"}:
-        raise ActionError(f"invalid vote: {vote!r}")
-    slot = find_slot(state, slot_id)
-    if slot["status"] != "open":
-        raise ActionError(f"slot {slot_id} is {slot['status']}, cannot vote")
-    slot.setdefault("votes", {})[member_name] = {
-        "vote": vote,
-        "voted_at": now.isoformat(),
-    }
-    return slot
-
-
-def mark_booked(
-    state: dict[str, Any],
-    slot_id: str,
-    booked_by: str,
-    now: datetime,
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Mark slot as booked, set horizon override, build a booking record.
-
-    Returns (slot, booking_record_for_jsonl).
+    docs/SPEC.md > Re-alert semantics:
+      - never alerted        -> alert
+      - MORE spots than last alerted -> re-alert (better opportunity)
+      - equal or fewer spots -> stay silent
     """
-    slot = find_slot(state, slot_id)
-    if slot["status"] != "open":
-        raise ActionError(f"slot {slot_id} is {slot['status']}, cannot book")
-    slot["status"] = "booked"
-    slot["booked_by"] = booked_by
-    slot["booked_at"] = now.isoformat()
-
-    booking = {
-        "booked_at": now.isoformat(),
-        "booked_by": booked_by,
-        "course_key": slot["course_key"],
-        "tee_date": slot["tee_date"],
-        "tee_time": slot["tee_time"],
-        "players": slot["players_open"],
-        "roster": _compute_roster(slot),
-        "undone_at": None,
-    }
-    return slot, booking
+    last = slot.get("last_alerted_spots")
+    if last is None:
+        return True
+    return slot["spots_open"] > last
 
 
-def mark_skipped(state: dict[str, Any], slot_id: str) -> dict[str, Any]:
-    slot = find_slot(state, slot_id)
-    if slot["status"] != "open":
-        raise ActionError(f"slot {slot_id} is {slot['status']}, cannot skip")
-    slot["status"] = "skipped"
+def record_alert(slot: dict[str, Any], now: datetime) -> dict[str, Any]:
+    """Stamp the slot as alerted at its current spot count."""
+    slot["last_alerted_spots"] = slot["spots_open"]
+    slot["last_alerted_at"] = now.isoformat()
     return slot
+
+
+def prune_past_slots(state: dict[str, Any], today: date) -> int:
+    """Drop slots whose tee date has passed. Returns how many were removed.
+
+    SPEC: expired slots are pruned silently — there's nothing to act on.
+    """
+    keep = [s for s in state["tee_times"] if date.fromisoformat(s["tee_date"]) >= today]
+    removed = len(state["tee_times"]) - len(keep)
+    state["tee_times"] = keep
+    return removed
+
+
+# --------------------------------------------------------------------------- #
+# Pause flag                                                                   #
+# --------------------------------------------------------------------------- #
 
 
 def set_paused(state: dict[str, Any], paused: bool, now: datetime | None) -> None:
@@ -146,42 +115,3 @@ def set_paused(state: dict[str, Any], paused: bool, now: datetime | None) -> Non
         state["pause_started_at"] = None
     elif state.get("pause_started_at") is None and now is not None:
         state["pause_started_at"] = now.isoformat()
-
-
-def undo_booking(
-    state: dict[str, Any],
-    slot_id: str,
-    now: datetime,
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Reverse a booking. Returns (slot, undo_record_for_jsonl).
-
-    Clears the horizon override and flips the slot status back to open so it
-    can be re-acted-on (booked again, skipped, expired).
-    """
-    slot = find_slot(state, slot_id)
-    if slot["status"] != "booked":
-        raise ActionError(f"slot {slot_id} is {slot['status']}, cannot undo")
-    slot["status"] = "open"
-    slot.pop("booked_by", None)
-    slot.pop("booked_at", None)
-
-    undo_record = {
-        "undone_at": now.isoformat(),
-        "course_key": slot["course_key"],
-        "tee_date": slot["tee_date"],
-        "tee_time": slot["tee_time"],
-    }
-    return slot, undo_record
-
-
-# --------------------------------------------------------------------------- #
-# Helpers                                                                      #
-# --------------------------------------------------------------------------- #
-
-
-def _compute_roster(slot: dict[str, Any]) -> dict[str, list[str]]:
-    votes = slot.get("votes", {})
-    return {
-        "yes": sorted(n for n, v in votes.items() if v["vote"] == "yes"),
-        "no":  sorted(n for n, v in votes.items() if v["vote"] == "no"),
-    }

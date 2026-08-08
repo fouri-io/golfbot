@@ -35,15 +35,11 @@ _DAY_INDEX: dict[str, int] = {
 class Match:
     """A slot that cleared the Gold Star bar.
 
-    Carries the original RawSlot plus the bits the notifier needs.
-    `members_in` / `members_out` are populated by the scanner once
-    availability is known; they're empty for callers that don't compute
-    them (e.g. `scrape --raw`).
+    Carries the original RawSlot plus the display name the notifier needs.
+    v2 has no roster: the bot no longer tracks who is in or out.
     """
     raw: RawSlot
     course_display: str
-    members_in: tuple[str, ...] = ()
-    members_out: tuple[str, ...] = ()
 
 
 # --------------------------------------------------------------------------- #

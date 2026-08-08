@@ -20,11 +20,7 @@ from typing import Any
 
 from telegram import Bot
 
-from dataclasses import replace
-
-from golfbot import availability as avail_mod
-from golfbot import bookings as bookings_mod
-from golfbot import notifier, store
+from golfbot import actions, notifier, store
 from golfbot import weather as weather_mod
 from golfbot.config import Config
 from golfbot.horizon import current_window
@@ -43,7 +39,7 @@ async def run_full_scan(
     """Fetch raw slots across all configured courses + dates with no filters.
 
     Used by the `/full` Telegram command — caller renders the output
-    directly without going through the Gold Star rule / availability gates.
+    directly without going through the Gold Star rule.
     """
     by_provider: dict[str, list] = {}
     for c in cfg.courses:
@@ -68,17 +64,13 @@ async def run_scan(
     cfg: Config,
     providers: dict[str, Provider],
     dates: list[date],
-    availability: dict[str, avail_mod.AvailabilityRecord] | None = None,
-    fallback_min_players: int = 1,
+    min_players: int = 1,
     prefetched: list[RawSlot] | None = None,
 ) -> list[Match]:
-    """Run providers + pipeline. Returns Policy-B-filtered matches annotated
-    with per-date roster.
+    """Run providers + the Gold Star rule. Returns qualifying matches.
 
-    Per date the scanner consults `availability` to decide:
-      - Skip the date if admin is out (and `cfg.group.admin_required`).
-      - Otherwise filter slots to those with `players_available >=` the
-        count of available registered members.
+    v2: no availability layer. Every date in the horizon is scanned and the
+    only player constraint is the rule's own `spots >= 1`.
 
     `prefetched` lets the caller pass in already-fetched RawSlots (used by
     `scan_and_notify` which caches the raw scan to make /full free).
@@ -87,58 +79,9 @@ async def run_scan(
     if prefetched is not None:
         raw: list[RawSlot] = list(prefetched)
     else:
-        by_provider: dict[str, list] = {}
-        for c in cfg.courses:
-            by_provider.setdefault(c.provider, []).append(c)
+        raw = await run_full_scan(cfg, providers, dates, min_players=min_players)
 
-        # Decide per-date queries.
-        scan_plan: list[tuple[date, int]] = []
-        for d in dates:
-            if availability is None:
-                scan_plan.append((d, fallback_min_players))
-                continue
-            if not avail_mod.date_should_be_scanned(d, cfg, availability):
-                log.info("scan: admin out for %s — skipping date", d)
-                continue
-            n = avail_mod.players_to_search_for(d, cfg, availability)
-            scan_plan.append((d, n))
-
-        raw = []
-        for provider_name, courses in by_provider.items():
-            prov = providers.get(provider_name)
-            if prov is None:
-                log.warning(
-                    "scanner: provider %r not registered — skipping %d course(s)",
-                    provider_name, len(courses),
-                )
-                continue
-            for d, min_players in scan_plan:
-                slots = await prov.fetch_slots(courses, d, min_players)
-                raw.extend(slots)
-
-    # Apply availability filters client-side. When using `prefetched`,
-    # raw may include dates where admin is out; drop those here.
-    #
-    # v2: no player-count filter. The Gold Star rule only requires >=1 open
-    # spot, so a slot is never dropped for being too small for the roster.
-    if availability is not None:
-        raw = [s for s in raw if avail_mod.date_should_be_scanned(s.tee_date, cfg, availability)]
-
-    matches = gold_star_slots(raw, cfg)
-
-    # Annotate each match with the per-date roster (if availability known).
-    if availability is None:
-        return matches
-    annotated: list[Match] = []
-    for m in matches:
-        members_in = avail_mod.available_members_on(m.raw.tee_date, cfg, availability)
-        members_out = avail_mod.out_members_on(m.raw.tee_date, cfg, availability)
-        annotated.append(replace(
-            m,
-            members_in=tuple(members_in),
-            members_out=tuple(members_out),
-        ))
-    return annotated
+    return gold_star_slots(raw, cfg)
 
 
 async def scan_and_notify(
@@ -153,10 +96,9 @@ async def scan_and_notify(
     """Scheduled-run entrypoint. Polls, dedups vs last scan, sends digest
     if changed. Returns the new last_scan dict for inspection/tests.
 
-    Fetches RAW slots for every date in horizon (no per-fetch availability
-    skip) and caches them in state.last_scan.raw_slots. This makes /full
-    free of fresh API calls. Filtering for the digest happens client-side
-    on top of the cached raw slots.
+    Fetches RAW slots for every date in horizon and caches them in
+    state.last_scan.raw_slots. This makes /full free of fresh API calls.
+    The Gold Star rule is applied client-side on top of the cached slots.
     """
     now = datetime.now(cfg.tz)
 
@@ -186,23 +128,22 @@ async def scan_and_notify(
         d = d + timedelta(days=1)
 
     state = store.load_state(state_path)
-    availability = avail_mod.load_availability(state)
+    state.setdefault("tee_times", [])
+    pruned = actions.prune_past_slots(state, today)
+    if pruned:
+        log.info("scan: pruned %d past slot(s) from the ledger", pruned)
     log.info(
-        "scan: %d course(s) x %d date(s), %d registered member(s)",
-        len(cfg.courses), len(dates), len(avail_mod.registered_members(cfg)),
+        "scan: %d course(s) x %d date(s), %d all-star",
+        len(cfg.courses), len(dates), len(cfg.all_star_courses()),
     )
 
-    # Fetch raw slots for every date in horizon. We always use the lowest
-    # practical min_players so /full has full coverage; per-date roster
-    # filtering happens client-side below.
+    # Fetch raw slots for every date in horizon at the lowest practical
+    # min_players so /full has full coverage; the Gold Star rule is applied
+    # client-side on top of the cached raw slots.
     raw_slots = await run_full_scan(cfg, providers, dates, min_players=1)
     raw_dicts = [s.to_dict() for s in raw_slots]
 
-    # Now apply the filter pipeline on top of the raw cache.
-    matches = await run_scan(
-        cfg, providers, dates, availability=availability,
-        prefetched=raw_slots,
-    )
+    matches = await run_scan(cfg, providers, dates, prefetched=raw_slots)
 
     state["last_poll_at"] = now.isoformat()
     paused = bool(state.get("paused"))
@@ -250,7 +191,6 @@ async def scan_and_notify(
         )
     else:
         try:
-            bookings = bookings_mod.load_bookings(state)
             weather_dict = _weather_dict_for_render(state)
             msg_id = await notifier.send_digest(
                 bot=bot,
@@ -259,7 +199,6 @@ async def scan_and_notify(
                 run_at=now,
                 next_run_at=next_run_at,
                 cfg=cfg,
-                bookings=bookings,
                 weather=weather_dict,
             )
             last_scan["telegram_message_id"] = msg_id
@@ -288,8 +227,6 @@ def match_to_dict(m: Match) -> dict[str, Any]:
         "booking_url": m.raw.booking_url,
         "price_usd": m.raw.price_usd,
         "provider": m.raw.provider,
-        "members_in": list(m.members_in),
-        "members_out": list(m.members_out),
     }
 
 
@@ -302,14 +239,10 @@ def _weather_dict_for_render(state: dict[str, Any]) -> dict[str, dict[str, Any]]
 def _signature(match_dicts: list[dict[str, Any]]) -> frozenset[tuple]:
     """Stable identity for a set of matches — used to decide if scan changed.
 
-    Includes slot identity plus per-date roster, so an `/out` from a member
-    causes a re-notification with the updated roster.
+    v2: slot identity plus open-spot count. The roster is gone, so a change
+    means the availability itself moved, not who can play.
     """
     return frozenset(
-        (
-            m["course_key"], m["tee_date"], m["tee_time"], m["players_available"],
-            tuple(m.get("members_in") or ()),
-            tuple(m.get("members_out") or ()),
-        )
+        (m["course_key"], m["tee_date"], m["tee_time"], m["players_available"])
         for m in match_dicts
     )

@@ -1,10 +1,12 @@
-"""Synthetic tee-time injector for P1.
+"""Synthetic Gold Star injector — for exercising the alert without scraping.
 
-Builds a TeeTimeSlot from CLI args, upserts it into state.json, sends the
-initial Telegram notification, and persists the message_id. The running
-`golfbot run` process serves any button taps that follow.
+Builds a TeeTimeSlot from CLI args, upserts it into the state ledger, and
+sends the alert. Used to check the alert renders correctly without waiting
+for a real cancellation to appear.
 
-See docs/SPEC.md > Phasing > P1.
+Slice 4 rewrites the alert format itself; this module just feeds it.
+
+See docs/SPEC.md > Notifications.
 """
 from __future__ import annotations
 
@@ -27,8 +29,7 @@ def build_mock_slot(
     course_key: str,
     tee_date: date,
     tee_time: time,
-    players: int,
-    grade: str,
+    spots: int,
     now: datetime,
 ) -> TeeTimeSlot:
     """Pure constructor — no I/O. Useful for testing in isolation."""
@@ -37,17 +38,15 @@ def build_mock_slot(
         known = ", ".join(c.key for c in cfg.courses)
         raise ValueError(f"unknown course {course_key!r}; known: {known}")
     return TeeTimeSlot(
-        id=make_slot_id(course_key, tee_date, tee_time, players),
+        id=make_slot_id(course_key, tee_date, tee_time),
         course_key=course_key,
         tee_date=tee_date,
         tee_time=tee_time,
-        players_open=players,
+        spots_open=spots,
         holes=cfg.search.holes,
-        grade=grade,
         booking_url=_MOCK_BOOKING_URL,
         first_seen_at=now,
         last_seen_at=now,
-        status="open",
     )
 
 
@@ -59,23 +58,21 @@ async def inject(
     course_key: str,
     tee_date: date,
     tee_time: time,
-    players: int,
-    grade: str,
+    spots: int,
 ) -> tuple[TeeTimeSlot, int]:
     """Inject + send. Returns (slot, telegram_message_id)."""
     now = datetime.now(cfg.tz)
-    slot = build_mock_slot(cfg, course_key, tee_date, tee_time, players, grade, now)
+    slot = build_mock_slot(cfg, course_key, tee_date, tee_time, spots, now)
 
     state = store.load_state(state_path)
+    state.setdefault("tee_times", [])
     slot_in_state, _is_new = actions.upsert_slot(state, slot.to_dict(), now)
 
     bot = Bot(token=bot_token)
     async with bot:
-        member_names = [m.name for m in cfg.group.members]
         course_display = cfg.course_by_key(course_key).display  # type: ignore[union-attr]
-        message_id = await notifier.send_new_slot(
-            bot, chat_id, slot, course_display, member_names,
-        )
-    slot_in_state["message_id"] = message_id
+        message_id = await notifier.send_new_slot(bot, chat_id, slot, course_display)
+
+    actions.record_alert(slot_in_state, now)
     await store.save_state(state_path, state)
     return slot, message_id
