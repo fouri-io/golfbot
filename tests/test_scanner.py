@@ -19,8 +19,8 @@ def cfg():
     return load(REPO_ROOT / "config.yaml")
 
 
-def _match(course="roy_kizer", display="Roy Kizer", tier=1, d=date(2026, 5, 18),
-           t=time(7, 30), players=3, grade="A") -> Match:
+def _match(course="roy_kizer", display="Roy Kizer", d=date(2026, 5, 18),
+           t=time(7, 40), players=3) -> Match:
     return Match(
         raw=RawSlot(
             course_key=course,
@@ -32,9 +32,7 @@ def _match(course="roy_kizer", display="Roy Kizer", tier=1, d=date(2026, 5, 18),
             provider="golfatx",
             price_usd=None,
         ),
-        grade=grade,
         course_display=display,
-        course_tier=tier,
     )
 
 
@@ -44,10 +42,12 @@ def test_match_to_dict_roundtrip(cfg):
     assert d["course_key"] == "roy_kizer"
     assert d["course_display"] == "Roy Kizer"
     assert d["tee_date"] == "2026-05-18"
-    assert d["tee_time"] == "07:30:00"
-    assert d["grade"] == "A"
+    assert d["tee_time"] == "07:40:00"
     assert d["players_available"] == 3
     assert d["booking_url"].startswith("https://")
+    # v2: grading is retired — these keys are gone from the serialized Match.
+    assert "grade" not in d
+    assert "course_tier" not in d
 
 
 def test_signature_identical_match_sets():
@@ -76,12 +76,11 @@ def test_signature_detects_players_count_change():
     assert _signature(a) != _signature(b)
 
 
-def test_signature_ignores_grade_change():
-    """Hypothetical: same slot regrades. We don't care for dedup purposes
-    — slot identity is the same. (Wouldn't happen in practice since grade
-    is derived from time which is part of the signature.)"""
-    a = [match_to_dict(_match(grade="A"))]
-    b = [match_to_dict(_match(grade="B"))]
+def test_signature_ignores_course_display_change():
+    """Display name is presentation, not identity — renaming a course in
+    config must not re-fire the digest."""
+    a = [match_to_dict(_match(display="Roy Kizer"))]
+    b = [match_to_dict(_match(display="Roy Kizer GC"))]
     assert _signature(a) == _signature(b)
 
 

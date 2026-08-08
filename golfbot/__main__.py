@@ -51,7 +51,7 @@ def main(argv: list[str] | None = None) -> int:
     scrape.add_argument(
         "--raw",
         action="store_true",
-        help="show unfiltered API output (skip day/time/grade filters + Policy B)",
+        help="show unfiltered API output (skip the Gold Star rule entirely)",
     )
 
     args = parser.parse_args(argv)
@@ -174,7 +174,7 @@ def _cmd_run() -> int:
 def _cmd_scrape(args: argparse.Namespace) -> int:
     """Scrape provider(s) for tee times and print results.
 
-    Default: full configured horizon, filter+grade+Policy B, show preview
+    Default: full configured horizon, Gold Star rule applied, show preview
     of what would notify. `--raw` shows unfiltered API output (debug mode).
     """
     load_dotenv()
@@ -292,16 +292,17 @@ def _cmd_scrape(args: argparse.Namespace) -> int:
     # We don't have the raw counts here (run_scan filters internally), but the
     # per-fetch logs already show them. Show the funnel summary using what we know.
     days = ", ".join(d[:3].capitalize() for d in cfg.search.days_of_week)
-    win = cfg.time_windows.acceptable
+    win = cfg.premium_window
+    all_star = ", ".join(c.display for c in cfg.courses if c.all_star)
     print("\n" + "─" * 70, file=sys.stderr)
     print("Funnel:", file=sys.stderr)
     print(
-        f"  after filters + Policy B: {len(matches):>4} match(es)  "
-        f"(days={days}, window={win.start.strftime('%H:%M')}-"
-        f"{win.end.strftime('%H:%M')}, "
-        f"grade≥{cfg.grading.notify_min_grade})",
+        f"  Gold Stars: {len(matches):>4} match(es)  "
+        f"(days={days}, premium={win.start.strftime('%H:%M')}-"
+        f"{win.end.strftime('%H:%M')}, spots≥1)",
         file=sys.stderr,
     )
+    print(f"  all-star  : {all_star}", file=sys.stderr)
     print("─" * 70, file=sys.stderr)
 
     if not matches:
@@ -314,7 +315,7 @@ def _cmd_scrape(args: argparse.Namespace) -> int:
         price = f"${m.raw.price_usd:.2f}" if m.raw.price_usd is not None else "—"
         print(
             f"  {dow} {m.raw.tee_date} {m.raw.tee_time.strftime('%H:%M')}  "
-            f"Grade {m.grade}  {m.course_display:18} "
+            f"{m.course_display:18} "
             f"≥{m.raw.players_available}p  {price:>7}  {m.raw.booking_url}"
         )
     return 0
@@ -331,41 +332,6 @@ def _print_raw(slots: list, dates: list, players: int) -> None:
             f"  {s.tee_date} {s.tee_time.strftime('%H:%M')}  "
             f"{s.course_key:18} {s.holes}h  ≥{s.players_available}p  {price:>7}  "
             f"[{s.provider}]  {s.booking_url}"
-        )
-
-
-def _print_preview(raw, graded, best, cfg, dates, players: int) -> None:
-    """The funnel view + final notifiable matches."""
-    days = ", ".join(d[:3].capitalize() for d in cfg.search.days_of_week)
-    ideal = cfg.time_windows.acceptable
-    print("\n" + "─" * 70, file=sys.stderr)
-    print("Funnel:", file=sys.stderr)
-    print(f"  fetched      : {len(raw):>4} raw slot(s)", file=sys.stderr)
-    print(
-        f"  after filters: {len(graded):>4}  "
-        f"(days={days}, window={ideal.start.strftime('%H:%M')}-"
-        f"{ideal.end.strftime('%H:%M')}, "
-        f"grade≥{cfg.grading.notify_min_grade})",
-        file=sys.stderr,
-    )
-    print(
-        f"  Policy B     : {len(best):>4}  (best per course-date)",
-        file=sys.stderr,
-    )
-    print("─" * 70, file=sys.stderr)
-
-    if not best:
-        print("\nNo notifiable matches.")
-        return
-
-    print(f"\nWould notify on {len(best)} match(es):\n")
-    for m in sorted(best, key=lambda x: (x.raw.tee_date, x.raw.tee_time)):
-        dow = m.raw.tee_date.strftime("%a")
-        price = f"${m.raw.price_usd:.2f}" if m.raw.price_usd is not None else "—"
-        print(
-            f"  {dow} {m.raw.tee_date} {m.raw.tee_time.strftime('%H:%M')}  "
-            f"Grade {m.grade}  {m.course_display:18} "
-            f"≥{m.raw.players_available}p  {price:>7}  {m.raw.booking_url}"
         )
 
 

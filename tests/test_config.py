@@ -9,7 +9,6 @@ import pytest
 from golfbot.config import (
     Config,
     TimeWindow,
-    TimeWindows,
     load,
     resolve_telegram_secrets,
 )
@@ -158,12 +157,22 @@ def test_time_window_rejects_equal():
         TimeWindow(start=time(8, 0), end=time(8, 0))
 
 
-def test_ideal_must_fit_acceptable():
-    with pytest.raises(ValueError, match="must fit within acceptable"):
-        TimeWindows(
-            ideal=TimeWindow(start=time(6, 0), end=time(10, 0)),
-            acceptable=TimeWindow(start=time(7, 0), end=time(9, 0)),
-        )
+def test_premium_window_rejects_inverted(tmp_path):
+    bad = SAMPLE_CONFIG.read_text().replace(
+        'premium_window: { start: "07:20", end: "08:00" }',
+        'premium_window: { start: "09:00", end: "07:00" }',
+    )
+    p = tmp_path / "config.yaml"
+    p.write_text(bad)
+    with pytest.raises(ValueError, match="must be before end"):
+        load(p)
+
+
+def test_all_star_courses_helper():
+    cfg = load(SAMPLE_CONFIG)
+    assert [c.key for c in cfg.all_star_courses()] == [
+        "jimmy_clay", "roy_kizer", "riverside", "grey_rock_golf_club",
+    ]
 
 
 # ---------- cross-field validation in Config ----------

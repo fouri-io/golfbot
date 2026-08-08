@@ -715,9 +715,10 @@ async def cmd_courses(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if update.message is None:
         return
     ctx = _ctx(context)
-    lines = ["Watched courses:"]
+    # Every course is scanned; ⭐ marks the ones that can fire an alert.
+    lines = ["Watched courses (⭐ = all-star, can alert):"]
     for c in ctx.cfg.courses:
-        lines.append(f"• {c.display} (tier {c.tier})")
+        lines.append(f"• {'⭐ ' if c.all_star else ''}{c.display}")
     await update.message.reply_text("\n".join(lines))
 
 

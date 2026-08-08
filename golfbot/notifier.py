@@ -703,7 +703,10 @@ def _match_button_text(idx: int, m: dict, cfg: Config | None = None) -> str:
 
 def _render_digest_line(m: dict) -> str:
     """One line per match. Format:
-    'A · Mon 5/18 · 7:30 AM · Roy Kizer · 3 open · Colby+Ed (Steve out) · $45 · <a>book</a>'."""
+    'Mon 5/18 · 7:30 AM · Roy Kizer · 3 open · Colby+Ed (Steve out) · $45 · <a>book</a>'.
+
+    v2: no grade badge — everything here already cleared the Gold Star bar,
+    so a per-row quality marker carries no information."""
     import html as _html
     tee_date = date.fromisoformat(m["tee_date"])
     tee_time = time.fromisoformat(m["tee_time"])
@@ -712,14 +715,12 @@ def _render_digest_line(m: dict) -> str:
     d = f"{tee_date.month}/{tee_date.day}"
     t = _fmt_time(tee_time)
 
-    grade = m["grade"]
     course = _html.escape(m["course_display"])
     players = m["players_available"]
     price = m.get("price_usd")
     price_str = f"${price:.0f}" if price else None
 
     parts = [
-        f"<b>{grade}</b>",
         f"{dow} {d}",
         t,
         course,

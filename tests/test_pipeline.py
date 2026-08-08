@@ -1,4 +1,8 @@
-"""Tests for golfbot.pipeline."""
+"""Tests for golfbot.pipeline — the Gold Star rule.
+
+docs/SPEC.md > The Gold Star rule: a slot qualifies iff ALL hold —
+all-star course, premium window, weekday, >=1 open spot.
+"""
 from __future__ import annotations
 
 from datetime import date, time
@@ -8,14 +12,23 @@ import pytest
 
 from golfbot.config import load
 from golfbot.pipeline import (
-    Match,
-    apply_policy_b,
-    filter_and_grade,
+    gold_star_slots,
+    in_premium_window,
     is_desired_day,
+    qualifies,
 )
 from golfbot.providers.base import RawSlot
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+# Calendar anchors used throughout. 2026-05-18 is a Monday.
+MON = date(2026, 5, 18)
+FRI = date(2026, 5, 22)
+SAT = date(2026, 5, 23)
+SUN = date(2026, 5, 24)
+
+# config.yaml: premium_window 07:20–08:00
+IN_WINDOW = time(7, 40)
 
 
 @pytest.fixture
@@ -23,12 +36,12 @@ def cfg():
     return load(REPO_ROOT / "config.yaml")
 
 
-def _slot(course: str, d: date, t: time, players: int = 3) -> RawSlot:
+def _slot(course: str, d: date = MON, t: time = IN_WINDOW, spots: int = 3) -> RawSlot:
     return RawSlot(
         course_key=course,
         tee_date=d,
         tee_time=t,
-        players_available=players,
+        players_available=spots,
         holes=18,
         booking_url=f"https://example.com/{course}/{d}/{t.strftime('%H%M')}",
         provider="golfnow",
@@ -40,107 +53,113 @@ def _slot(course: str, d: date, t: time, players: int = 3) -> RawSlot:
 
 
 def test_is_desired_day_weekdays():
-    # 2026-05-18 is a Monday
-    assert is_desired_day(date(2026, 5, 18), ["monday", "tuesday"]) is True
+    assert is_desired_day(MON, ["monday", "tuesday"]) is True
     assert is_desired_day(date(2026, 5, 19), ["monday", "tuesday"]) is True
     assert is_desired_day(date(2026, 5, 20), ["monday", "tuesday"]) is False
 
 
 def test_is_desired_day_weekend():
-    # 2026-05-23 is a Saturday
-    assert is_desired_day(date(2026, 5, 23), ["saturday", "sunday"]) is True
-    assert is_desired_day(date(2026, 5, 24), ["saturday", "sunday"]) is True
-    assert is_desired_day(date(2026, 5, 22), ["saturday", "sunday"]) is False  # Fri
+    assert is_desired_day(SAT, ["saturday", "sunday"]) is True
+    assert is_desired_day(SUN, ["saturday", "sunday"]) is True
+    assert is_desired_day(FRI, ["saturday", "sunday"]) is False
 
 
-# ---------- filter_and_grade ----------
+# ---------- the four Gold Star conditions, one at a time ----------
 
 
-def test_filter_no_longer_drops_by_day_of_week(cfg):
-    """The pipeline no longer filters by `days_of_week` — per-member
-    weekly availability patterns handle this instead. The slot survives
-    grading; the scanner's availability check decides whether to scan it."""
-    slots = [_slot("roy_kizer", date(2026, 5, 23), time(7, 30))]
-    assert len(filter_and_grade(slots, cfg)) == 1
+def test_qualifies_when_all_conditions_hold(cfg):
+    assert qualifies(_slot("roy_kizer"), cfg) is True
 
 
-def test_filter_drops_unknown_course(cfg):
-    slots = [_slot("pebble_beach", date(2026, 5, 18), time(7, 30))]
-    assert filter_and_grade(slots, cfg) == []
+def test_rejects_non_all_star_course(cfg):
+    """Morris Williams is scanned but is not all-star — it can never alert."""
+    assert qualifies(_slot("morris_williams"), cfg) is False
 
 
-def test_filter_drops_outside_acceptable_window(cfg):
-    # acceptable = 07:00-09:00; 14:00 is way out
-    slots = [_slot("roy_kizer", date(2026, 5, 18), time(14, 0))]
-    assert filter_and_grade(slots, cfg) == []
+def test_rejects_unknown_course(cfg):
+    assert qualifies(_slot("pebble_beach"), cfg) is False
 
 
-def test_filter_drops_below_min_grade(cfg):
-    # notify_min_grade = B; tier-2 course in acceptable but non-ideal = C
-    # Morris Williams is tier-2; 8:30 is acceptable but not ideal → C → dropped
-    slots = [_slot("morris_williams", date(2026, 5, 18), time(8, 30))]
-    assert filter_and_grade(slots, cfg) == []
+def test_rejects_weekend(cfg):
+    assert qualifies(_slot("roy_kizer", d=SAT), cfg) is False
+    assert qualifies(_slot("roy_kizer", d=SUN), cfg) is False
 
 
-def test_filter_keeps_grade_A(cfg):
-    # Roy Kizer is tier-1; 7:30 is in ideal window → Grade A
-    slots = [_slot("roy_kizer", date(2026, 5, 18), time(7, 30))]
-    matches = filter_and_grade(slots, cfg)
-    assert len(matches) == 1
-    assert matches[0].grade == "A"
-    assert matches[0].course_display == "Roy Kizer"
-    assert matches[0].course_tier == 1
+def test_rejects_outside_premium_window(cfg):
+    assert qualifies(_slot("roy_kizer", t=time(7, 0)), cfg) is False    # too early
+    assert qualifies(_slot("roy_kizer", t=time(8, 30)), cfg) is False   # too late
+    assert qualifies(_slot("roy_kizer", t=time(14, 0)), cfg) is False
 
 
-def test_filter_keeps_grade_B_tier2_ideal(cfg):
-    # Morris Williams is tier-2; 7:30 is ideal → B
-    slots = [_slot("morris_williams", date(2026, 5, 18), time(7, 30))]
-    matches = filter_and_grade(slots, cfg)
-    assert len(matches) == 1
-    assert matches[0].grade == "B"
+def test_rejects_zero_spots(cfg):
+    assert qualifies(_slot("roy_kizer", spots=0), cfg) is False
 
 
-def test_filter_drops_all_star_outside_premium_window(cfg):
-    """v2 has a single premium window — there is no wider 'acceptable' band.
+def test_accepts_single_spot(cfg):
+    """v2 drops player-count matching entirely — one open spot is enough."""
+    assert qualifies(_slot("roy_kizer", spots=1), cfg) is True
 
-    Roy Kizer at 8:30 qualified under v1 (tier-1, acceptable → B). With
-    `premium_window` as the only bar it is now dropped, all-star or not.
+
+# ---------- window boundaries are inclusive on both ends ----------
+
+
+def test_premium_window_boundaries_are_inclusive(cfg):
+    assert in_premium_window(_slot("roy_kizer", t=time(7, 20)), cfg) is True
+    assert in_premium_window(_slot("roy_kizer", t=time(8, 0)), cfg) is True
+
+
+def test_just_outside_premium_window_is_rejected(cfg):
+    assert in_premium_window(_slot("roy_kizer", t=time(7, 19)), cfg) is False
+    assert in_premium_window(_slot("roy_kizer", t=time(8, 1)), cfg) is False
+
+
+# ---------- gold_star_slots ----------
+
+
+def test_gold_star_slots_keeps_only_all_star_courses(cfg):
+    """Scan all, alert on four — the non-all-star slots are dropped here."""
+    slots = [
+        _slot("roy_kizer"),
+        _slot("jimmy_clay"),
+        _slot("riverside"),
+        _slot("grey_rock_golf_club"),
+        _slot("morris_williams"),
+        _slot("lions"),
+        _slot("avery_ranch_golf_club"),
+    ]
+    out = gold_star_slots(slots, cfg)
+    assert {m.raw.course_key for m in out} == {
+        "roy_kizer", "jimmy_clay", "riverside", "grey_rock_golf_club",
+    }
+
+
+def test_gold_star_slots_sets_course_display(cfg):
+    out = gold_star_slots([_slot("roy_kizer")], cfg)
+    assert len(out) == 1
+    assert out[0].course_display == "Roy Kizer"
+    assert out[0].members_in == ()
+    assert out[0].members_out == ()
+
+
+def test_gold_star_slots_keeps_every_qualifying_time(cfg):
+    """No Policy B: same course+date no longer collapses to one best slot.
+
+    ADR 0003 is superseded — each qualifying slot is its own Match so the
+    state ledger can dedup and re-alert per slot.
     """
-    slots = [_slot("roy_kizer", date(2026, 5, 18), time(8, 30))]
-    assert filter_and_grade(slots, cfg) == []
-
-
-# ---------- apply_policy_b ----------
-
-
-def test_policy_b_picks_higher_grade(cfg):
-    # Two slots at Roy Kizer on the same date: one A, one B → keep A
-    matches = [
-        Match(_slot("roy_kizer", date(2026, 5, 18), time(8, 30)), "B", "Roy Kizer", 1),
-        Match(_slot("roy_kizer", date(2026, 5, 18), time(7, 45)), "A", "Roy Kizer", 1),
+    slots = [
+        _slot("roy_kizer", t=time(7, 20)),
+        _slot("roy_kizer", t=time(7, 40)),
+        _slot("roy_kizer", t=time(8, 0)),
     ]
-    out = apply_policy_b(matches)
-    assert len(out) == 1
-    assert out[0].grade == "A"
-    assert out[0].raw.tee_time == time(7, 45)
-
-
-def test_policy_b_tiebreaks_by_earlier_time(cfg):
-    matches = [
-        Match(_slot("roy_kizer", date(2026, 5, 18), time(8, 0)), "A", "Roy Kizer", 1),
-        Match(_slot("roy_kizer", date(2026, 5, 18), time(7, 30)), "A", "Roy Kizer", 1),
-    ]
-    out = apply_policy_b(matches)
-    assert len(out) == 1
-    assert out[0].raw.tee_time == time(7, 30)
-
-
-def test_policy_b_keeps_distinct_pairs(cfg):
-    """Different (course, date) pairs each get their own slot."""
-    matches = [
-        Match(_slot("roy_kizer", date(2026, 5, 18), time(7, 30)), "A", "Roy Kizer", 1),
-        Match(_slot("riverside", date(2026, 5, 18), time(7, 30)), "B", "Riverside", 2),
-        Match(_slot("roy_kizer", date(2026, 5, 19), time(7, 30)), "A", "Roy Kizer", 1),
-    ]
-    out = apply_policy_b(matches)
+    out = gold_star_slots(slots, cfg)
     assert len(out) == 3
+    assert sorted(m.raw.tee_time for m in out) == [time(7, 20), time(7, 40), time(8, 0)]
+
+
+def test_gold_star_slots_empty_input(cfg):
+    assert gold_star_slots([], cfg) == []
+
+
+def test_gold_star_slots_all_rejected(cfg):
+    assert gold_star_slots([_slot("lions"), _slot("roy_kizer", d=SAT)], cfg) == []

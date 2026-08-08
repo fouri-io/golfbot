@@ -3,7 +3,7 @@
 `run_scan` is the shared core used by both the `golfbot scrape` CLI and
 the scheduled `golfbot run` job. Given config + provider registry + a
 list of dates, it runs every provider, normalizes/filters/grades,
-applies Policy B, and returns a `list[Match]`.
+applies the Gold Star rule, and returns a `list[Match]`.
 
 `scan_and_notify` is the scheduler entrypoint — it wraps `run_scan`,
 compares the result against the previously-stored scan, and sends a
@@ -28,7 +28,7 @@ from golfbot import notifier, store
 from golfbot import weather as weather_mod
 from golfbot.config import Config
 from golfbot.horizon import current_window
-from golfbot.pipeline import Match, apply_policy_b, filter_and_grade
+from golfbot.pipeline import Match, gold_star_slots
 from golfbot.providers.base import Provider, RawSlot
 
 log = logging.getLogger(__name__)
@@ -38,12 +38,12 @@ async def run_full_scan(
     cfg: Config,
     providers: dict[str, Provider],
     dates: list[date],
-    min_players: int = 2,
+    min_players: int = 1,
 ) -> list[RawSlot]:
     """Fetch raw slots across all configured courses + dates with no filters.
 
     Used by the `/full` Telegram command — caller renders the output
-    directly without going through grading / Policy B / availability gates.
+    directly without going through the Gold Star rule / availability gates.
     """
     by_provider: dict[str, list] = {}
     for c in cfg.courses:
@@ -118,22 +118,19 @@ async def run_scan(
 
     # Apply availability filters client-side. When using `prefetched`,
     # raw may include dates where admin is out; drop those here.
+    #
+    # v2: no player-count filter. The Gold Star rule only requires >=1 open
+    # spot, so a slot is never dropped for being too small for the roster.
     if availability is not None:
         raw = [s for s in raw if avail_mod.date_should_be_scanned(s.tee_date, cfg, availability)]
-        # Also: require slot.players_available >= group size needed
-        raw = [
-            s for s in raw
-            if s.players_available >= avail_mod.players_to_search_for(s.tee_date, cfg, availability)
-        ]
 
-    graded = filter_and_grade(raw, cfg)
-    best = apply_policy_b(graded)
+    matches = gold_star_slots(raw, cfg)
 
     # Annotate each match with the per-date roster (if availability known).
     if availability is None:
-        return best
+        return matches
     annotated: list[Match] = []
-    for m in best:
+    for m in matches:
         members_in = avail_mod.available_members_on(m.raw.tee_date, cfg, availability)
         members_out = avail_mod.out_members_on(m.raw.tee_date, cfg, availability)
         annotated.append(replace(
@@ -198,7 +195,7 @@ async def scan_and_notify(
     # Fetch raw slots for every date in horizon. We always use the lowest
     # practical min_players so /full has full coverage; per-date roster
     # filtering happens client-side below.
-    raw_slots = await run_full_scan(cfg, providers, dates, min_players=2)
+    raw_slots = await run_full_scan(cfg, providers, dates, min_players=1)
     raw_dicts = [s.to_dict() for s in raw_slots]
 
     # Now apply the filter pipeline on top of the raw cache.
@@ -284,10 +281,8 @@ def match_to_dict(m: Match) -> dict[str, Any]:
     return {
         "course_key": m.raw.course_key,
         "course_display": m.course_display,
-        "course_tier": m.course_tier,
         "tee_date": m.raw.tee_date.isoformat(),
         "tee_time": m.raw.tee_time.isoformat(),
-        "grade": m.grade,
         "players_available": m.raw.players_available,
         "holes": m.raw.holes,
         "booking_url": m.raw.booking_url,

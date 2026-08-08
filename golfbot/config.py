@@ -8,8 +8,8 @@ See docs/SPEC.md > Config schema (v2) for the canonical shape.
 
 v2 (Gold Star pivot): the quality bar is a single `premium_window` plus a
 per-course `all_star` flag. The v1 two-axis grading config (`time_windows`,
-`grading`, course `tier`) is gone from the file format — see
-docs/decisions/0006-gold-star-pivot.md.
+`grading`, course `tier`) is gone from both the file format and the model —
+see docs/decisions/0006-gold-star-pivot.md.
 """
 from __future__ import annotations
 
@@ -26,7 +26,6 @@ DayOfWeek = Literal[
     "monday", "tuesday", "wednesday", "thursday",
     "friday", "saturday", "sunday",
 ]
-Grade = Literal["A", "B", "C"]
 
 
 class TimeWindow(BaseModel):
@@ -38,40 +37,6 @@ class TimeWindow(BaseModel):
         if self.start >= self.end:
             raise ValueError(f"start ({self.start}) must be before end ({self.end})")
         return self
-
-
-# --------------------------------------------------------------------------- #
-# v1 compatibility shims — TEMPORARY                                          #
-#                                                                             #
-# `TimeWindows` and `Grading` are no longer parsed from config.yaml. They      #
-# survive only so the not-yet-rewritten consumers (pipeline.filter_and_grade,  #
-# grading.py, notifier.render_status, the scrape CLI) keep working during the  #
-# v2 refactor. Slice 2 replaces those consumers with the Gold Star rule and    #
-# both of these classes — plus the `Config.time_windows` / `Config.grading` /  #
-# `Course.tier` properties below — get deleted.                                #
-#                                                                             #
-# Do not add new readers of these.                                            #
-# --------------------------------------------------------------------------- #
-
-
-class TimeWindows(BaseModel):
-    """v1 only. Superseded by `Config.premium_window`."""
-    ideal: TimeWindow
-    acceptable: TimeWindow
-
-    @model_validator(mode="after")
-    def _ideal_within_acceptable(self) -> TimeWindows:
-        if self.ideal.start < self.acceptable.start or self.ideal.end > self.acceptable.end:
-            raise ValueError(
-                f"ideal {self.ideal.start}-{self.ideal.end} must fit within "
-                f"acceptable {self.acceptable.start}-{self.acceptable.end}"
-            )
-        return self
-
-
-class Grading(BaseModel):
-    """v1 only. v2 has no grades — the premium window is the whole bar."""
-    notify_min_grade: Grade
 
 
 class Search(BaseModel):
@@ -93,11 +58,6 @@ class Course(BaseModel):
     # Only all-star courses can fire a Gold Star alert. Every configured
     # course is still scanned so /full shows the complete picture.
     all_star: bool = False
-
-    @property
-    def tier(self) -> int:
-        """v1 compat shim — see the block comment above. Deleted in Slice 2."""
-        return 1 if self.all_star else 2
 
 
 class Alerts(BaseModel):
@@ -219,17 +179,9 @@ class Config(BaseModel):
     def course_by_key(self, key: str) -> Course | None:
         return next((c for c in self.courses if c.key == key), None)
 
-    # ----- v1 compat shims — see the block comment above. Deleted in Slice 2.
-
-    @property
-    def time_windows(self) -> TimeWindows:
-        """Collapses to the premium window on both axes, so v1 grading code
-        treats "in the premium window" as the only passing bucket."""
-        return TimeWindows(ideal=self.premium_window, acceptable=self.premium_window)
-
-    @property
-    def grading(self) -> Grading:
-        return Grading(notify_min_grade="B")
+    def all_star_courses(self) -> list[Course]:
+        """The only courses that can fire an alert (docs/SPEC.md > All-star set)."""
+        return [c for c in self.courses if c.all_star]
 
 
 # Keys that existed in v1 and are gone in v2. Mapping value is the replacement

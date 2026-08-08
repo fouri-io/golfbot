@@ -118,7 +118,7 @@ def build_request_body(facility_id: int, target_date: date, min_players: int) ->
 
     `timeMin` / `timeMax` are encoded as **half-hours past midnight**
     (not hours). We send 0..48 to capture the entire day; the time-window
-    filter happens client-side in `pipeline.filter_and_grade`.
+    filter happens client-side in `pipeline.qualifies`.
     """
     return {
         "useWidgetNextAvailableDays": None,
