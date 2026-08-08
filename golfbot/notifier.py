@@ -205,12 +205,17 @@ def render_full_listing(
     all-star set.
 
     Each (course, date) cell shows the count + up to
-    `_FULL_MAX_TIMES_PER_COURSE` earliest times. When a forecast is cached
-    it is appended to each date heading. Output is truncated to fit in a
-    single Telegram message (4096-char limit) with a note when cut.
+    `_FULL_MAX_TIMES_PER_COURSE` earliest times. Qualifying times are
+    prefixed with ⭐ and counted in the header, so /full doubles as the way
+    to review the current Gold Star set once the alert messages have
+    scrolled past. When a forecast is cached it is appended to each date
+    heading. Output is truncated to fit in a single Telegram message
+    (4096-char limit) with a note when cut.
     """
     import html as _html
     from collections import defaultdict
+
+    from golfbot.pipeline import qualifies
 
     weather = weather or {}
     course_display: dict[str, str] = {c.key: c.display for c in cfg.courses}
@@ -220,10 +225,21 @@ def render_full_listing(
     for s in slots:
         by_date[s.tee_date][s.course_key].append(s)
 
+    # A ⭐ means "clears the Gold Star bar right now", not "was alerted" — a
+    # slot already announced at this spot count stays starred but silent.
+    # `qualifies` is pure and cheap, so call it rather than tracking identity
+    # (RawSlot carries a dict, so it isn't hashable).
+    gold_count = sum(1 for s in slots if qualifies(s, cfg))
+
+    star_line = (
+        f"⭐ <b>{gold_count} Gold Star{'s' if gold_count != 1 else ''}</b>"
+        if gold_count else "☆ <i>No Gold Stars</i>"
+    )
     header = [
         f"🏌️ <b>All Slots</b> — {_fmt_clock(run_at)}",
         f"<i>{len(cfg.courses)} courses · "
         f"{', '.join(d[:3].capitalize() for d in cfg.search.days_of_week)} · 18-hole</i>",
+        star_line,
         "",
     ]
     body_lines: list[str] = []
@@ -245,7 +261,10 @@ def render_full_listing(
         ):
             ss = sorted(course_slots[course_key], key=lambda s: s.tee_time)
             display = _html.escape(course_display.get(course_key, course_key))
-            shown = [s.tee_time.strftime("%H:%M") for s in ss[:_FULL_MAX_TIMES_PER_COURSE]]
+            shown = [
+                ("⭐" if qualifies(s, cfg) else "") + s.tee_time.strftime("%H:%M")
+                for s in ss[:_FULL_MAX_TIMES_PER_COURSE]
+            ]
             extra = len(ss) - len(shown)
             times_str = ", ".join(shown)
             if extra > 0:

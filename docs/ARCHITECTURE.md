@@ -134,6 +134,20 @@ slot. Everything else is on demand.
 | `/full` | asked | `notifier.render_full_listing` |
 | `/status` | asked | `notifier.render_status` |
 
+`/full` marks qualifying times with **⭐** and counts them in its header, so it
+doubles as the way to review the current Gold Star set after the alert messages
+have scrolled past. A ⭐ means "clears the bar right now", not "was alerted" —
+a slot already announced at the same spot count stays starred but silent.
+
+**Send pacing.** Telegram rate-limits per-chat sends to roughly one per second.
+A scan that finds several Gold Stars paces them (`_ALERT_SEND_INTERVAL_SECONDS`)
+and retries a timeout up to `_ALERT_SEND_ATTEMPTS` times; PTB's own timeouts are
+raised well above its 5s defaults in `build_app`. A `TimedOut` means we never
+saw the response, **not** that the message failed to arrive — so a retry can
+duplicate a message that landed. That trade is deliberate: a duplicate is a
+minor annoyance, a silently dropped Gold Star defeats the tool. Slots whose
+sends all fail stay unstamped and are retried on the next scan.
+
 The alert headline is drawn from `alerts.headlines` in config by
 `notifier.pick_headline` — uniform random, never repeating the immediately
 previous line, with `{name}` replaced by a random roster member. The no-repeat

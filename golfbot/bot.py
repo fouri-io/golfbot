@@ -105,8 +105,20 @@ def build_app(
 
     `post_init` / `post_shutdown` are optional async callbacks PTB invokes
     around the app lifecycle — used by `_cmd_run` to attach the scheduler.
+
+    Timeouts are raised well above PTB's 5s defaults. A scan can fire several
+    Gold Star alerts back-to-back, and Telegram rate-limits per-chat sends to
+    roughly one per second — so the later sends in a burst sit waiting on the
+    server and blow a 5s read budget. See `scanner._send_alert`.
     """
-    builder = ApplicationBuilder().token(token)
+    builder = (
+        ApplicationBuilder()
+        .token(token)
+        .connect_timeout(10.0)
+        .read_timeout(20.0)
+        .write_timeout(20.0)
+        .pool_timeout(5.0)
+    )
     if post_init is not None:
         builder = builder.post_init(post_init)
     if post_shutdown is not None:

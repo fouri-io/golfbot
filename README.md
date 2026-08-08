@@ -77,7 +77,7 @@ To keep running with the lid shut, be on AC power and use `caffeinate -is`.
 
 | Command | Who | Effect |
 |---|---|---|
-| `/full` | anyone | Every open slot in horizon — all courses, all times |
+| `/full` | anyone | Every open slot in horizon — all courses, all times, with ⭐ on current Gold Stars |
 | `/scan` | anyone | Force a scan right now |
 | `/status` | anyone | All-star set, premium window, last/next scan |
 | `/courses` | anyone | All scanned courses (⭐ = can alert) |

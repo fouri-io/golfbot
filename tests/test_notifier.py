@@ -332,6 +332,43 @@ def test_render_full_listing_empty(cfg):
     assert "No slots available" in out
 
 
+def test_render_full_listing_stars_gold_star_times(cfg):
+    """docs/SPEC.md > /full: qualifying times are prefixed with ⭐ so /full
+    doubles as the review view once alerts have scrolled past."""
+    mon, sat = date(2026, 5, 18), date(2026, 5, 23)
+    out = render_full_listing([
+        _raw("roy_kizer", mon, time(7, 40)),        # all-star, in window, weekday
+        _raw("roy_kizer", mon, time(11, 20)),       # outside premium window
+        _raw("lions", mon, time(7, 40)),            # in window but not all-star
+        _raw("jimmy_clay", sat, time(7, 40)),       # all-star but a weekend
+    ], cfg, datetime(2026, 5, 16, 12, 30))
+
+    assert "⭐ <b>1 Gold Star</b>" in out
+    assert "⭐07:40" in out
+    assert "⭐11:20" not in out
+    # Lions and the Saturday slot are listed, just not starred.
+    assert "Lions" in out and "Jimmy Clay" in out
+    assert out.count("⭐07:40") == 1
+
+
+def test_render_full_listing_no_gold_stars_header(cfg):
+    out = render_full_listing(
+        [_raw("lions", date(2026, 5, 18), time(9, 30))],
+        cfg, datetime(2026, 5, 16, 12, 30),
+    )
+    assert "☆ <i>No Gold Stars</i>" in out
+    assert "⭐" not in out
+
+
+def test_render_full_listing_pluralizes_gold_star_count(cfg):
+    mon = date(2026, 5, 18)
+    out = render_full_listing([
+        _raw("roy_kizer", mon, time(7, 40)),
+        _raw("jimmy_clay", mon, time(7, 30)),
+    ], cfg, datetime(2026, 5, 16, 12, 30))
+    assert "⭐ <b>2 Gold Stars</b>" in out
+
+
 def test_render_full_listing_shows_forecast_on_date_heading(cfg):
     """docs/SPEC.md > Weather: shown in the /full listing when enabled."""
     out = render_full_listing(

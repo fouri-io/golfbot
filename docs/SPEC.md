@@ -111,10 +111,35 @@ A re-alert (spots increased) is an identical fresh message with the new count.
 ### `/full` — the on-demand firehose
 
 `/full` lists **every** available slot from the last scan — all configured
-courses, all times, not just the premium window. This is the "let me actually
-browse everything" escape hatch. Format follows the existing digest listing: one
-row per slot with course · date · time · spots and a booking link, grouped by
-date. No push; only shown when asked.
+courses, all times, not just the premium window and not just the all-star set.
+This is the "let me actually browse everything" escape hatch. No push; only
+shown when asked, and it reads the cached scan so it costs no API calls.
+
+Grouped by date, then by course, showing the count and the earliest times.
+Qualifying times are prefixed with **⭐**, and a count of current Gold Stars
+sits in the header — so `/full` doubles as the way to review what alerted
+after the alert messages have scrolled past. Mocks are literal:
+
+```
+🏌️ All Slots — 12:30 PM
+9 courses · Mon, Tue, Wed, Thu, Fri · 18-hole
+⭐ 3 Gold Stars
+
+Mon 5/18 (14)  🌤️ 87°/66° · Rain 12%
+  Roy Kizer (5): ⭐7:40, ⭐7:55, 9:10, 11:20, 14:05
+  Lions (4): 8:15, 9:30, 13:00, 15:45
+
+Tue 5/19 (9)
+  Jimmy Clay (3): ⭐7:30, 10:15, 13:40
+```
+
+A ⭐ means the slot clears the Gold Star bar *right now* — it does not mean an
+alert was sent for it (a slot already alerted at the same spot count stays
+starred but silent).
+
+When no slot qualifies the header line reads `☆ No Gold Stars`. Output is
+truncated to fit Telegram's 4096-character limit, dropping whole trailing days
+first and saying so.
 
 ### Expired
 

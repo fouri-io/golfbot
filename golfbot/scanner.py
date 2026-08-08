@@ -15,12 +15,15 @@ calls.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from telegram import Bot
+from telegram.error import RetryAfter
+from telegram.error import TimedOut as TelegramTimedOut
 
 from golfbot import actions, notifier, store
 from golfbot import weather as weather_mod
@@ -31,6 +34,13 @@ from golfbot.pipeline import Match, gold_star_slots
 from golfbot.providers.base import Provider, RawSlot
 
 log = logging.getLogger(__name__)
+
+# Telegram allows roughly one message per second to a given chat. A scan that
+# finds several Gold Stars at once must pace itself or the tail of the burst
+# sits queued on Telegram's side until our read timeout fires.
+_ALERT_SEND_INTERVAL_SECONDS = 1.0
+_ALERT_SEND_ATTEMPTS = 3
+_ALERT_RETRY_BACKOFF_SECONDS = 2.0
 
 
 async def run_full_scan(
@@ -185,25 +195,24 @@ async def scan_and_notify(
         if due:
             log.info("scan: %d slot(s) due to alert but notifications are paused", len(due))
     else:
-        for slot_in_state in due:
-            try:
-                slot = TeeTimeSlot.from_dict(slot_in_state)
-                await notifier.send_new_slot(
-                    bot=bot,
-                    chat_id=chat_id,
-                    slot=slot,
-                    course_display=_course_display(cfg, slot.course_key),
-                    headline=notifier.pick_headline(cfg),
-                )
-            except Exception:
-                # Leave the slot un-stamped so the next scan retries it.
-                log.exception("scan: failed to send alert for %s", slot_in_state["id"])
+        for i, slot_in_state in enumerate(due):
+            # Telegram rate-limits per-chat sends to roughly 1/sec. Pace the
+            # burst rather than letting the server queue it and time us out.
+            if i:
+                await asyncio.sleep(_ALERT_SEND_INTERVAL_SECONDS)
+            if not await _send_alert(bot, chat_id, cfg, slot_in_state):
                 continue
             actions.record_alert(slot_in_state, now)
             state["last_alert_at"] = now.isoformat()
             sent += 1
         if sent:
             log.info("scan: sent %d Gold Star alert(s)", sent)
+        if len(due) != sent:
+            log.warning(
+                "scan: %d of %d alert(s) failed to send; they stay unstamped "
+                "and will be retried on the next scan",
+                len(due) - sent, len(due),
+            )
 
     await store.save_state(state_path, state)
     return {
@@ -212,6 +221,62 @@ async def scan_and_notify(
         "raw_slots": raw_dicts,
         "alerts_sent": sent,
     }
+
+
+async def _send_alert(
+    bot: Bot,
+    chat_id: int,
+    cfg: Config,
+    slot_in_state: dict[str, Any],
+) -> bool:
+    """Send one Gold Star alert, retrying briefly on a timeout.
+
+    Returns True if the send is believed to have succeeded — only then does
+    the caller stamp the ledger.
+
+    A `TimedOut` means we never saw Telegram's response, NOT that the message
+    failed to arrive. Retrying can therefore duplicate a message that did land.
+    We accept that: a duplicate is a minor annoyance, a silently dropped Gold
+    Star defeats the point of the tool. Exhausting the retries leaves the slot
+    unstamped so the next scan tries again.
+    """
+    slot = TeeTimeSlot.from_dict(slot_in_state)
+    course_display = _course_display(cfg, slot.course_key)
+
+    for attempt in range(1, _ALERT_SEND_ATTEMPTS + 1):
+        try:
+            await notifier.send_new_slot(
+                bot=bot,
+                chat_id=chat_id,
+                slot=slot,
+                course_display=course_display,
+                headline=notifier.pick_headline(cfg),
+            )
+            return True
+        except TelegramTimedOut:
+            if attempt < _ALERT_SEND_ATTEMPTS:
+                log.warning(
+                    "scan: alert for %s timed out (attempt %d/%d) — retrying",
+                    slot.id, attempt, _ALERT_SEND_ATTEMPTS,
+                )
+                await asyncio.sleep(_ALERT_RETRY_BACKOFF_SECONDS * attempt)
+                continue
+            log.error(
+                "scan: alert for %s timed out after %d attempt(s); it may or "
+                "may not have been delivered",
+                slot.id, _ALERT_SEND_ATTEMPTS,
+            )
+            return False
+        except RetryAfter as e:
+            # Flood control: Telegram tells us exactly how long to wait.
+            wait = float(getattr(e, "retry_after", _ALERT_RETRY_BACKOFF_SECONDS))
+            log.warning("scan: flood control on %s — waiting %.0fs", slot.id, wait)
+            await asyncio.sleep(wait)
+            continue
+        except Exception:
+            log.exception("scan: failed to send alert for %s", slot.id)
+            return False
+    return False
 
 
 def _course_display(cfg: Config, course_key: str) -> str:

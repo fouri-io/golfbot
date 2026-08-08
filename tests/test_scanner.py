@@ -9,8 +9,9 @@ from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
 import pytest
+from telegram.error import TimedOut as TelegramTimedOut
 
-from golfbot import store
+from golfbot import scanner, store
 from golfbot.config import load
 from golfbot.horizon import current_window
 from golfbot.pipeline import Match, is_desired_day
@@ -236,6 +237,79 @@ async def test_scan_caches_all_raw_slots_including_non_all_star(cfg, tmp_path, w
     cached = {(s["course_key"], s["tee_time"]) for s in result["raw_slots"]}
     assert ("lions", "07:40:00") in cached
     assert ("roy_kizer", "14:00:00") in cached
+
+
+class FlakyBot(FakeBot):
+    """Raises TimedOut for the first `fail_times` sends, then succeeds."""
+
+    def __init__(self, fail_times: int):
+        super().__init__()
+        self.fail_times = fail_times
+        self.attempts = 0
+
+    async def send_message(self, chat_id, text, **kw):
+        self.attempts += 1
+        if self.attempts <= self.fail_times:
+            raise TelegramTimedOut()
+        return await super().send_message(chat_id, text, **kw)
+
+
+@pytest.fixture(autouse=True)
+def _no_send_delays(monkeypatch):
+    """Keep the pacing/backoff logic exercised but instant under test."""
+    monkeypatch.setattr(scanner, "_ALERT_SEND_INTERVAL_SECONDS", 0)
+    monkeypatch.setattr(scanner, "_ALERT_RETRY_BACKOFF_SECONDS", 0)
+
+
+async def test_transient_timeout_is_retried_and_stamped(cfg, tmp_path, weekday):
+    """A ReadTimeout on the first attempt must not lose the alert."""
+    p = tmp_path / "state.json"
+    bot = FlakyBot(fail_times=1)
+    await _scan(cfg, p, [_raw(weekday)], bot=bot)
+
+    assert bot.attempts == 2          # one failure, one success
+    assert len(bot.sent) == 1
+    assert store.load_state(p)["tee_times"][0]["last_alerted_spots"] == 3
+
+
+async def test_persistent_timeout_leaves_slot_unstamped(cfg, tmp_path, weekday):
+    """Exhausting retries must leave the slot due, so the next scan retries."""
+    p = tmp_path / "state.json"
+    bot = FlakyBot(fail_times=99)
+    await _scan(cfg, p, [_raw(weekday)], bot=bot)
+
+    assert bot.sent == []
+    assert bot.attempts == scanner._ALERT_SEND_ATTEMPTS
+    entry = store.load_state(p)["tee_times"][0]
+    assert entry["last_alerted_spots"] is None, "must stay due for the next scan"
+
+    # Next scan, Telegram healthy again -> the alert finally lands.
+    bot2 = FakeBot()
+    await _scan(cfg, p, [_raw(weekday)], bot=bot2)
+    assert len(bot2.sent) == 1
+
+
+async def test_one_bad_send_does_not_block_the_others(cfg, tmp_path, weekday):
+    """A failure mid-burst must not abort the remaining alerts."""
+    p = tmp_path / "state.json"
+
+    class OneBadBot(FakeBot):
+        async def send_message(self, chat_id, text, **kw):
+            if "Riverside" in text:
+                raise RuntimeError("boom")
+            return await super().send_message(chat_id, text, **kw)
+
+    bot = OneBadBot()
+    await _scan(cfg, p, [
+        _raw(weekday, course="roy_kizer"),
+        _raw(weekday, course="riverside"),
+        _raw(weekday, course="jimmy_clay"),
+    ], bot=bot)
+
+    assert len(bot.sent) == 2
+    ledger = {s["course_key"]: s for s in store.load_state(p)["tee_times"]}
+    assert ledger["riverside"]["last_alerted_spots"] is None
+    assert ledger["roy_kizer"]["last_alerted_spots"] == 3
 
 
 async def test_raw_slots_persist_at_top_level(cfg, tmp_path, weekday):
