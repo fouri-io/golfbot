@@ -1,88 +1,238 @@
-"""Tests for golfbot.scanner — digest dedup logic, no network."""
+"""Tests for golfbot.scanner — Gold Star ledger + alert loop.
+
+No network: providers are fakes, Telegram is a fake, and weather is
+disabled on the test config so nothing reaches Open-Meteo.
+"""
 from __future__ import annotations
 
-from datetime import date, time
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
 import pytest
 
+from golfbot import store
 from golfbot.config import load
-from golfbot.pipeline import Match
+from golfbot.horizon import current_window
+from golfbot.pipeline import Match, is_desired_day
 from golfbot.providers.base import RawSlot
-from golfbot.scanner import _signature, match_to_dict
+from golfbot.scanner import match_to_dict, scan_and_notify
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+IN_WINDOW = time(7, 40)      # config premium_window is 07:20-08:00
+OUT_OF_WINDOW = time(14, 0)
 
 
 @pytest.fixture
 def cfg():
-    return load(REPO_ROOT / "config.yaml")
+    """Repo config with weather disabled — tests must not hit Open-Meteo."""
+    return load(REPO_ROOT / "config.yaml").model_copy(update={"weather": None})
 
 
-def _match(course="roy_kizer", display="Roy Kizer", d=date(2026, 5, 18),
-           t=time(7, 40), players=3) -> Match:
-    return Match(
-        raw=RawSlot(
-            course_key=course,
-            tee_date=d,
-            tee_time=t,
-            players_available=players,
-            holes=18,
-            booking_url="https://example.com/book/" + course,
-            provider="golfatx",
-            price_usd=None,
-        ),
-        course_display=display,
+def _horizon_dates(cfg) -> list[date]:
+    start, end = current_window(
+        today=datetime.now(cfg.tz).date(),
+        start_offset_days=cfg.search.start_offset_days,
+        horizon_days=cfg.search.horizon_days,
+    )
+    out, d = [], start
+    while d <= end:
+        out.append(d)
+        d += timedelta(days=1)
+    return out
+
+
+@pytest.fixture
+def weekday(cfg) -> date:
+    """A scannable weekday inside the live horizon."""
+    for d in _horizon_dates(cfg):
+        if is_desired_day(d, cfg.search.days_of_week):
+            return d
+    pytest.skip("no configured weekday falls in the current horizon")
+
+
+@pytest.fixture
+def weekend(cfg) -> date:
+    for d in _horizon_dates(cfg):
+        if not is_desired_day(d, cfg.search.days_of_week):
+            return d
+    pytest.skip("no weekend day falls in the current horizon")
+
+
+def _raw(d: date, course="roy_kizer", t=IN_WINDOW, spots=3) -> RawSlot:
+    return RawSlot(
+        course_key=course,
+        tee_date=d,
+        tee_time=t,
+        players_available=spots,
+        holes=18,
+        booking_url="https://example.com/book/" + course,
+        provider="golfatx",
+        price_usd=None,
     )
 
 
-def test_match_to_dict_roundtrip(cfg):
-    m = _match()
-    d = match_to_dict(m)
+class FakeBot:
+    """Records send_message calls instead of touching Telegram."""
+
+    def __init__(self):
+        self.sent: list[dict] = []
+
+    async def send_message(self, chat_id, text, **kw):
+        self.sent.append({"chat_id": chat_id, "text": text, **kw})
+        message_id = 100 + len(self.sent)
+        return type("_Msg", (), {"message_id": message_id})()
+
+
+class FakeProvider:
+    def __init__(self, slots: list[RawSlot]):
+        self._slots = slots
+
+    async def fetch_slots(self, courses, target_date, min_players):
+        owned = {c.key for c in courses}
+        return [
+            s for s in self._slots
+            if s.tee_date == target_date and s.course_key in owned
+        ]
+
+
+async def _scan(cfg, state_path, slots, bot=None):
+    bot = bot or FakeBot()
+    providers = {"golfatx": FakeProvider(slots), "golfnow": FakeProvider(slots)}
+    result = await scan_and_notify(
+        cfg=cfg, providers=providers, state_path=state_path,
+        bot=bot, chat_id=-1, force=True,
+    )
+    return bot, result
+
+
+# ---------- match_to_dict ----------
+
+
+def test_match_to_dict_drops_retired_keys():
+    d = match_to_dict(Match(raw=_raw(date(2026, 5, 18)), course_display="Roy Kizer"))
     assert d["course_key"] == "roy_kizer"
     assert d["course_display"] == "Roy Kizer"
-    assert d["tee_date"] == "2026-05-18"
     assert d["tee_time"] == "07:40:00"
     assert d["players_available"] == 3
-    assert d["booking_url"].startswith("https://")
-    # v2: grading is retired — these keys are gone from the serialized Match.
-    assert "grade" not in d
-    assert "course_tier" not in d
+    for gone in ("grade", "course_tier", "members_in", "members_out"):
+        assert gone not in d
 
 
-def test_signature_identical_match_sets():
-    a = [match_to_dict(_match())]
-    b = [match_to_dict(_match())]
-    assert _signature(a) == _signature(b)
+# ---------- the alert loop (docs/SPEC.md > Re-alert semantics) ----------
 
 
-def test_signature_detects_added_match():
-    a = [match_to_dict(_match())]
-    b = a + [match_to_dict(_match(d=date(2026, 5, 19)))]
-    assert _signature(a) != _signature(b)
+async def test_first_sighting_alerts(cfg, tmp_path, weekday):
+    bot, result = await _scan(cfg, tmp_path / "state.json", [_raw(weekday)])
+    assert len(bot.sent) == 1
+    assert bot.sent[0]["text"].startswith("🎯 ")
+    assert "Roy Kizer" in bot.sent[0]["text"]
+    assert "3 spots open" in bot.sent[0]["text"]
+    assert len(result["matches"]) == 1
 
 
-def test_signature_detects_removed_match():
-    a = [match_to_dict(_match()), match_to_dict(_match(d=date(2026, 5, 19)))]
-    b = a[:1]
-    assert _signature(a) != _signature(b)
+async def test_unchanged_slot_does_not_realert(cfg, tmp_path, weekday):
+    p = tmp_path / "state.json"
+    slots = [_raw(weekday)]
+    bot1, _ = await _scan(cfg, p, slots)
+    bot2, _ = await _scan(cfg, p, slots)
+    assert len(bot1.sent) == 1
+    assert bot2.sent == [], "an unchanged slot must stay silent"
 
 
-def test_signature_detects_players_count_change():
-    """A slot dropping from 4 open to 3 open should count as a change —
-    someone booked one seat, worth re-notifying."""
-    a = [match_to_dict(_match(players=4))]
-    b = [match_to_dict(_match(players=3))]
-    assert _signature(a) != _signature(b)
+async def test_more_spots_triggers_realert(cfg, tmp_path, weekday):
+    p = tmp_path / "state.json"
+    bot1, _ = await _scan(cfg, p, [_raw(weekday, spots=2)])
+    bot2, _ = await _scan(cfg, p, [_raw(weekday, spots=4)])
+    assert len(bot1.sent) == 1
+    assert len(bot2.sent) == 1, "more open spots is a better opportunity"
+    assert "4 spots open" in bot2.sent[0]["text"]
 
 
-def test_signature_ignores_course_display_change():
-    """Display name is presentation, not identity — renaming a course in
-    config must not re-fire the digest."""
-    a = [match_to_dict(_match(display="Roy Kizer"))]
-    b = [match_to_dict(_match(display="Roy Kizer GC"))]
-    assert _signature(a) == _signature(b)
+async def test_fewer_spots_stays_silent(cfg, tmp_path, weekday):
+    p = tmp_path / "state.json"
+    await _scan(cfg, p, [_raw(weekday, spots=4)])
+    bot2, _ = await _scan(cfg, p, [_raw(weekday, spots=1)])
+    assert bot2.sent == []
 
 
-def test_signature_empty_lists_equal():
-    assert _signature([]) == _signature([])
+async def test_ledger_records_alert_state(cfg, tmp_path, weekday):
+    p = tmp_path / "state.json"
+    await _scan(cfg, p, [_raw(weekday, spots=3)])
+    ledger = store.load_state(p)["tee_times"]
+    assert len(ledger) == 1
+    entry = ledger[0]
+    assert entry["id"] == f"roy_kizer:{weekday.isoformat()}:0740"
+    assert entry["spots_open"] == 3
+    assert entry["last_alerted_spots"] == 3
+    assert entry["last_alerted_at"] is not None
+
+
+async def test_slot_id_has_no_spot_component(cfg, tmp_path, weekday):
+    """Spot count changes must land on the SAME ledger row, not a new one."""
+    p = tmp_path / "state.json"
+    await _scan(cfg, p, [_raw(weekday, spots=2)])
+    await _scan(cfg, p, [_raw(weekday, spots=4)])
+    assert len(store.load_state(p)["tee_times"]) == 1
+
+
+# ---------- what must never alert ----------
+
+
+async def test_paused_suppresses_alerts(cfg, tmp_path, weekday):
+    p = tmp_path / "state.json"
+    state = store.default_state()
+    state["paused"] = True
+    await store.save_state(p, state)
+
+    bot, _ = await _scan(cfg, p, [_raw(weekday)])
+    assert bot.sent == []
+
+
+async def test_paused_does_not_stamp_the_ledger(cfg, tmp_path, weekday):
+    """A slot muted by /pause must alert once /resume lands."""
+    p = tmp_path / "state.json"
+    state = store.default_state()
+    state["paused"] = True
+    await store.save_state(p, state)
+    await _scan(cfg, p, [_raw(weekday)])
+
+    state = store.load_state(p)
+    state["paused"] = False
+    await store.save_state(p, state)
+
+    bot, _ = await _scan(cfg, p, [_raw(weekday)])
+    assert len(bot.sent) == 1
+
+
+async def test_non_all_star_course_never_alerts(cfg, tmp_path, weekday):
+    bot, result = await _scan(cfg, tmp_path / "state.json", [_raw(weekday, course="lions")])
+    assert bot.sent == []
+    assert result["matches"] == []
+
+
+async def test_weekend_never_alerts(cfg, tmp_path, weekend):
+    bot, result = await _scan(cfg, tmp_path / "state.json", [_raw(weekend)])
+    assert bot.sent == []
+    assert result["matches"] == []
+
+
+async def test_outside_premium_window_never_alerts(cfg, tmp_path, weekday):
+    bot, result = await _scan(cfg, tmp_path / "state.json", [_raw(weekday, t=OUT_OF_WINDOW)])
+    assert bot.sent == []
+    assert result["matches"] == []
+
+
+# ---------- /full cache ----------
+
+
+async def test_scan_caches_all_raw_slots_including_non_all_star(cfg, tmp_path, weekday):
+    """Scan all, alert on four: /full needs every slot, not just winners."""
+    _, result = await _scan(cfg, tmp_path / "state.json", [
+        _raw(weekday),
+        _raw(weekday, course="lions"),
+        _raw(weekday, t=OUT_OF_WINDOW),
+    ])
+    cached = {(s["course_key"], s["tee_time"]) for s in result["raw_slots"]}
+    assert ("lions", "07:40:00") in cached
+    assert ("roy_kizer", "14:00:00") in cached

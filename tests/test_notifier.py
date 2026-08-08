@@ -1,7 +1,10 @@
 """Tests for golfbot.notifier (pure rendering only; Telegram API not exercised)."""
 from __future__ import annotations
 
+import random
+from dataclasses import replace
 from datetime import date, datetime, time
+from itertools import pairwise
 from pathlib import Path
 
 import pytest
@@ -9,11 +12,12 @@ import pytest
 from golfbot.config import load
 from golfbot.models import TeeTimeSlot
 from golfbot.notifier import (
+    FALLBACK_HEADLINE,
     _fmt_clock,
     _fmt_date,
     _fmt_time,
     build_keyboard_open,
-    render_digest,
+    pick_headline,
     render_full_listing,
     render_open,
     render_status,
@@ -84,22 +88,120 @@ def test_fmt_clock():
     assert _fmt_clock(datetime(2026, 5, 15, 14, 14)) == "2:14 PM"
 
 
+# ---------- pick_headline (docs/SPEC.md > Snark) ----------
+
+
+def test_headline_comes_from_the_configured_pool(cfg):
+    rng = random.Random(0)
+    out = pick_headline(cfg, rng=rng, state={"last": None})
+    templates = {h.replace("{name}", n) for h in cfg.alerts.headlines
+                 for n in [m.name for m in cfg.group.members]}
+    assert out in set(cfg.alerts.headlines) | templates
+
+
+def test_headline_never_repeats_the_previous_one(cfg):
+    """Seeded RNG so the sequence is reproducible; the re-roll must hold
+    across a long run. Compared on templates, since {name} substitution
+    would otherwise mask a repeat."""
+    rng = random.Random(1234)
+    state: dict = {"last": None}
+    seen: list[str | None] = []
+    for _ in range(200):
+        pick_headline(cfg, rng=rng, state=state)
+        seen.append(state["last"])
+    assert all(a != b for a, b in pairwise(seen))
+
+
+def test_headline_pool_gets_reasonable_coverage(cfg):
+    """No-repeat must not collapse to alternating between two lines."""
+    rng = random.Random(99)
+    state: dict = {"last": None}
+    seen = set()
+    for _ in range(200):
+        pick_headline(cfg, rng=rng, state=state)
+        seen.add(state["last"])
+    assert len(seen) == len(cfg.alerts.headlines)
+
+
+def test_headline_substitutes_a_roster_name(cfg):
+    cfg = cfg.model_copy(update={
+        "alerts": cfg.alerts.model_copy(update={"headlines": ["Beat {name} to it"]}),
+    })
+    out = pick_headline(cfg, rng=random.Random(7), state={"last": None})
+    assert "{name}" not in out
+    assert out.replace("Beat ", "").replace(" to it", "") in {
+        m.name for m in cfg.group.members
+    }
+
+
+def test_headline_falls_back_when_pool_is_empty(cfg):
+    cfg = cfg.model_copy(update={
+        "alerts": cfg.alerts.model_copy(update={"headlines": []}),
+    })
+    assert pick_headline(cfg, rng=random.Random(0), state={"last": None}) == (
+        FALLBACK_HEADLINE
+    )
+
+
+def test_single_headline_pool_does_not_hang(cfg):
+    """A one-line pool can't satisfy no-repeat; it must not spin forever."""
+    cfg = cfg.model_copy(update={
+        "alerts": cfg.alerts.model_copy(update={"headlines": ["Only one"]}),
+    })
+    state: dict = {"last": None}
+    rng = random.Random(0)
+    assert [pick_headline(cfg, rng=rng, state=state) for _ in range(3)] == [
+        "Only one"] * 3
+
+
+def test_headline_state_is_isolated_per_caller(cfg):
+    """Tests pass their own state so they don't share module globals."""
+    a: dict = {"last": None}
+    b: dict = {"last": None}
+    pick_headline(cfg, rng=random.Random(0), state=a)
+    pick_headline(cfg, rng=random.Random(0), state=b)
+    assert a["last"] == b["last"]     # same seed, independent state
+
+
 # ---------- render_open (the Gold Star alert) ----------
+
+
+def test_render_open_matches_spec_format(slot):
+    """docs/SPEC.md > Gold Star alert — the mock is literal."""
+    out = render_open(slot, "Jimmy Clay", "Book it now, dumbass")
+    assert out == (
+        "🎯 Book it now, dumbass\n"
+        "\n"
+        "Jimmy Clay · Sat May 23\n"
+        "7:40 AM · 4 spots open"
+    )
 
 
 def test_render_open_has_no_vote_tally(slot):
     """v2 removed voting — no Yes/No/Waiting block, no roster."""
-    out = render_open(slot, "Roy Kizer")
+    out = render_open(slot, "Roy Kizer", "whatever")
     for gone in ("✅ Yes", "❌ No", "Waiting", "Availability", "Grade"):
         assert gone not in out
 
 
 def test_render_open_carries_the_facts(slot):
-    out = render_open(slot, "Roy Kizer")
+    out = render_open(slot, "Roy Kizer", "whatever")
     assert "Roy Kizer" in out
     assert "Sat May 23" in out
     assert "7:40 AM" in out
     assert "4 spots" in out
+
+
+def test_render_open_singular_spot(slot):
+    one = replace(slot, spots_open=1)
+    assert "1 spot open" in render_open(one, "Roy Kizer", "x")
+
+
+def test_render_open_escapes_html(slot):
+    """Headlines are user-editable config and the message is sent as HTML."""
+    out = render_open(slot, "Roy & <b>Kizer</b>", "Beat <Steve> & win")
+    assert "&lt;Steve&gt; &amp; win" in out
+    assert "Roy &amp; &lt;b&gt;Kizer&lt;/b&gt;" in out
 
 
 # ---------- keyboards ----------
@@ -153,68 +255,6 @@ def test_render_status_paused(cfg):
     out = render_status(state, cfg, today=date(2026, 5, 15))
     assert "Sat May 16 → Fri May 22" in out
     assert "🔔 Notifications: OFF (paused)" in out
-
-
-# ---------- render_digest ----------
-
-
-def test_render_digest_with_matches(cfg):
-    out = render_digest(
-        [_match(), _match("riverside", "Riverside", d="2026-05-19", price=45.0)],
-        datetime(2026, 5, 16, 11, 30), None, cfg,
-    )
-    assert "🏌️" in out
-    assert "11:30 AM" in out
-    assert "2 slots" in out
-    assert "Mon 5/18" in out
-    assert "Roy Kizer" in out
-    assert "Riverside" in out
-    assert "/full" in out
-
-
-def test_render_digest_no_matches(cfg):
-    out = render_digest([], datetime(2026, 5, 16, 11, 30), None, cfg)
-    assert "No matches" in out
-    assert "11:30 AM" in out
-
-
-def test_render_digest_singular_slot(cfg):
-    out = render_digest([_match()], datetime(2026, 5, 16, 11, 30), None, cfg)
-    assert "1 slot" in out
-    assert "1 slots" not in out
-
-
-def test_render_digest_escapes_html(cfg):
-    out = render_digest(
-        [_match(display="Roy <b>Kizer</b>", url="https://x/?a=1&b=2")],
-        datetime(2026, 5, 16, 11, 30), None, cfg,
-    )
-    assert "Roy &lt;b&gt;Kizer&lt;/b&gt;" in out
-    assert "&amp;b=2" in out
-
-
-def test_render_digest_has_no_roster(cfg):
-    """Availability is gone — no 'Colby+Ed (Steve out)' fragments."""
-    out = render_digest([_match()], datetime(2026, 5, 16, 11, 30), None, cfg)
-    assert "out)" not in out
-
-
-def test_render_digest_next_run_footer(cfg):
-    out = render_digest(
-        [], datetime(2026, 5, 16, 11, 30), datetime(2026, 5, 16, 12, 30), cfg,
-    )
-    assert "Next:" in out
-    assert "Last scan:" in out
-
-
-def test_render_digest_shows_forecast_when_weather_present(cfg):
-    out = render_digest(
-        [_match()], datetime(2026, 5, 16, 11, 30), None, cfg,
-        weather={"2026-05-18": {"tmax": 87.4, "tmin": 66.2, "rain_pct": 12, "code": 1}},
-    )
-    assert "Forecast" in out
-    assert "87°/66°" in out
-    assert "Rain 12%" in out
 
 
 # ---------- render_full_listing ----------
@@ -276,3 +316,22 @@ def test_render_full_listing_truncates_per_course(cfg):
 def test_render_full_listing_empty(cfg):
     out = render_full_listing([], cfg, datetime(2026, 5, 16, 12, 30))
     assert "No slots available" in out
+
+
+def test_render_full_listing_shows_forecast_on_date_heading(cfg):
+    """docs/SPEC.md > Weather: shown in the /full listing when enabled."""
+    out = render_full_listing(
+        [_raw("roy_kizer", date(2026, 5, 18), time(7, 40))],
+        cfg, datetime(2026, 5, 16, 12, 30),
+        weather={"2026-05-18": {"tmax": 87.4, "tmin": 66.2, "rain_pct": 12, "code": 1}},
+    )
+    assert "87°/66°" in out
+    assert "Rain 12%" in out
+
+
+def test_render_full_listing_without_forecast_is_unchanged(cfg):
+    """No cached weather must not leave a dangling separator."""
+    slots = [_raw("roy_kizer", date(2026, 5, 18), time(7, 40))]
+    bare = render_full_listing(slots, cfg, datetime(2026, 5, 16, 12, 30))
+    assert "Mon 5/18</b> (1)" in bare
+    assert "°" not in bare

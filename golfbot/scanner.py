@@ -5,11 +5,13 @@ the scheduled `golfbot run` job. Given config + provider registry + a
 list of dates, it runs every provider, normalizes/filters/grades,
 applies the Gold Star rule, and returns a `list[Match]`.
 
-`scan_and_notify` is the scheduler entrypoint — it wraps `run_scan`,
-compares the result against the previously-stored scan, and sends a
-new Telegram digest only when the match set changes (no spam on stable
-availability). On any change it persists the result to `state.json`
-so `/tee` can re-render it.
+`scan_and_notify` is the scheduler entrypoint — it wraps `run_scan`, folds
+each Gold Star into the `state.tee_times` ledger, and pushes one alert per
+slot that the re-alert rule says is worth announcing (first sighting, or
+more open spots than last announced). Stable availability produces silence.
+
+It also caches the full raw scan in `state.json` so `/full` costs no API
+calls.
 """
 from __future__ import annotations
 
@@ -24,6 +26,7 @@ from golfbot import actions, notifier, store
 from golfbot import weather as weather_mod
 from golfbot.config import Config
 from golfbot.horizon import current_window
+from golfbot.models import TeeTimeSlot, make_slot_id
 from golfbot.pipeline import Match, gold_star_slots
 from golfbot.providers.base import Provider, RawSlot
 
@@ -93,8 +96,9 @@ async def scan_and_notify(
     next_run_at: datetime | None = None,
     force: bool = False,
 ) -> dict[str, Any]:
-    """Scheduled-run entrypoint. Polls, dedups vs last scan, sends digest
-    if changed. Returns the new last_scan dict for inspection/tests.
+    """Scheduled-run entrypoint. Polls, folds Gold Stars into the ledger,
+    and sends one alert per slot that is due. Returns the new last_scan
+    dict for inspection/tests.
 
     Fetches RAW slots for every date in horizon and caches them in
     state.last_scan.raw_slots. This makes /full free of fresh API calls.
@@ -163,56 +167,72 @@ async def scan_and_notify(
             except Exception:
                 log.warning("weather: fetch failed; using existing cache if any", exc_info=True)
 
-    # Compare against previous match set
     current_dicts = [match_to_dict(m) for m in matches]
-    prev_dicts = (state.get("last_scan") or {}).get("matches", [])
-    if _signature(current_dicts) == _signature(prev_dicts):
-        log.info("scan: no change since previous scan (%d match(es))", len(matches))
-        # Update run_at + raw cache so /full and /status reflect fresh activity.
-        existing_scan = state.setdefault("last_scan", {})
-        existing_scan["run_at"] = now.isoformat()
-        existing_scan["raw_slots"] = raw_dicts
-        await store.save_state(state_path, state)
-        return state["last_scan"]
-
-    # Match set changed — record + (maybe) notify
     last_scan: dict[str, Any] = {
         "run_at": now.isoformat(),
         "matches": current_dicts,
         "raw_slots": raw_dicts,
         "next_run_at": next_run_at.isoformat() if next_run_at else None,
-        "telegram_message_id": None,
     }
 
+    # Fold every Gold Star into the ledger, then alert on the ones the
+    # re-alert rule says are worth a push (docs/SPEC.md > Re-alert semantics).
+    # Dedup lives entirely in the ledger — there is no digest-level compare.
+    due: list[dict[str, Any]] = []
+    for m in matches:
+        slot_dict = _match_to_slot_dict(m, now)
+        slot_in_state, _is_new = actions.upsert_slot(state, slot_dict, now)
+        if actions.should_alert(slot_in_state):
+            due.append(slot_in_state)
+
     if paused:
-        log.info(
-            "scan: %d new/changed match(es) but notifications are paused",
-            len(matches),
-        )
+        if due:
+            log.info("scan: %d slot(s) due to alert but notifications are paused", len(due))
     else:
-        try:
-            weather_dict = _weather_dict_for_render(state)
-            msg_id = await notifier.send_digest(
-                bot=bot,
-                chat_id=chat_id,
-                matches=current_dicts,
-                run_at=now,
-                next_run_at=next_run_at,
-                cfg=cfg,
-                weather=weather_dict,
-            )
-            last_scan["telegram_message_id"] = msg_id
-            state["last_digest_at"] = now.isoformat()
-            log.info(
-                "scan: sent digest (%d match(es), message_id=%s)",
-                len(matches), msg_id,
-            )
-        except Exception:
-            log.exception("scan: failed to send digest")
+        sent = 0
+        for slot_in_state in due:
+            try:
+                slot = TeeTimeSlot.from_dict(slot_in_state)
+                await notifier.send_new_slot(
+                    bot=bot,
+                    chat_id=chat_id,
+                    slot=slot,
+                    course_display=_course_display(cfg, slot.course_key),
+                    headline=notifier.pick_headline(cfg),
+                )
+            except Exception:
+                # Leave the slot un-stamped so the next scan retries it.
+                log.exception("scan: failed to send alert for %s", slot_in_state["id"])
+                continue
+            actions.record_alert(slot_in_state, now)
+            state["last_alert_at"] = now.isoformat()
+            sent += 1
+        if sent:
+            log.info("scan: sent %d Gold Star alert(s)", sent)
 
     state["last_scan"] = last_scan
     await store.save_state(state_path, state)
     return last_scan
+
+
+def _course_display(cfg: Config, course_key: str) -> str:
+    c = cfg.course_by_key(course_key)
+    return c.display if c else course_key
+
+
+def _match_to_slot_dict(m: Match, now: datetime) -> dict[str, Any]:
+    """Build a ledger entry from a Gold Star match."""
+    return TeeTimeSlot(
+        id=make_slot_id(m.raw.course_key, m.raw.tee_date, m.raw.tee_time),
+        course_key=m.raw.course_key,
+        tee_date=m.raw.tee_date,
+        tee_time=m.raw.tee_time,
+        spots_open=m.raw.players_available,
+        holes=m.raw.holes,
+        booking_url=m.raw.booking_url,
+        first_seen_at=now,
+        last_seen_at=now,
+    ).to_dict()
 
 
 def match_to_dict(m: Match) -> dict[str, Any]:
@@ -234,15 +254,3 @@ def _weather_dict_for_render(state: dict[str, Any]) -> dict[str, dict[str, Any]]
     """Renderer-friendly weather: {iso_date_str: WeatherDay.to_dict()}."""
     _, days = weather_mod.load_cache(state)
     return {d.isoformat(): wd.to_dict() for d, wd in days.items()}
-
-
-def _signature(match_dicts: list[dict[str, Any]]) -> frozenset[tuple]:
-    """Stable identity for a set of matches — used to decide if scan changed.
-
-    v2: slot identity plus open-spot count. The roster is gone, so a change
-    means the availability itself moved, not who can play.
-    """
-    return frozenset(
-        (m["course_key"], m["tee_date"], m["tee_time"], m["players_available"])
-        for m in match_dicts
-    )

@@ -293,7 +293,10 @@ async def cmd_full(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         from datetime import datetime as _dt
         run_at = _dt.fromisoformat(run_at_iso) if run_at_iso else ctx.now()
         slots = [RawSlot.from_dict(d) for d in raw_dicts]
-        text = _notifier.render_full_listing(slots, ctx.cfg, run_at)
+        from golfbot import scanner as _scanner
+        text = _notifier.render_full_listing(
+            slots, ctx.cfg, run_at, weather=_scanner._weather_dict_for_render(state),
+        )
         await update.message.reply_text(
             text,
             parse_mode=ParseMode.HTML,

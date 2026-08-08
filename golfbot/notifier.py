@@ -13,6 +13,7 @@ See docs/SPEC.md > Notifications.
 """
 from __future__ import annotations
 
+import random
 from datetime import date, datetime, time
 
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
@@ -20,6 +21,8 @@ from telegram.constants import ParseMode
 
 from golfbot.config import Config
 from golfbot.models import TeeTimeSlot
+
+_DEFAULT_RNG = random.Random()
 
 # --------------------------------------------------------------------------- #
 # Formatting helpers                                                          #
@@ -59,22 +62,76 @@ def _humanize_delta(delta_seconds: int) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# Snark                                                                       #
+# --------------------------------------------------------------------------- #
+
+# Used when `alerts.headlines` is empty or missing, so an alert never fails
+# for want of copy (docs/SPEC.md > Snark).
+FALLBACK_HEADLINE = "Gold Star — book it"
+
+# "Never repeat the immediately previous headline" is in-memory only; a
+# restart legitimately forgets. Tests pass their own state dict so they
+# don't share this one.
+_HEADLINE_STATE: dict[str, str | None] = {"last": None}
+
+
+def pick_headline(
+    cfg: Config,
+    rng: random.Random | None = None,
+    state: dict[str, str | None] | None = None,
+) -> str:
+    """Pick a random alert headline, never the immediately-previous one.
+
+    `{name}` in a headline is replaced with a random roster member, so
+    "Quick — before {name} sees it" becomes "Quick — before Steve sees it".
+
+    The no-repeat check is on the *template*, before substitution — else
+    the same line would recur with a different name and read as a repeat.
+    """
+    rng = rng or _DEFAULT_RNG
+    state = _HEADLINE_STATE if state is None else state
+
+    pool = list(cfg.alerts.headlines) or [FALLBACK_HEADLINE]
+
+    template = rng.choice(pool)
+    # A one-line pool can't avoid repeating itself; don't spin forever.
+    if len(pool) > 1:
+        while template == state.get("last"):
+            template = rng.choice(pool)
+    state["last"] = template
+
+    if "{name}" in template:
+        names = [m.name for m in cfg.group.members]
+        template = template.replace("{name}", rng.choice(names)) if names else template
+    return template
+
+
+# --------------------------------------------------------------------------- #
 # Pure renderers                                                              #
 # --------------------------------------------------------------------------- #
 
 
-def render_open(slot: TeeTimeSlot, course_display: str) -> str:
-    """Render a Gold Star alert.
+def render_open(slot: TeeTimeSlot, course_display: str, headline: str) -> str:
+    """Render a Gold Star alert (docs/SPEC.md > Gold Star alert).
 
-    Slice 4 rewrites this to the SPEC v2 format (randomized snark headline
-    + factual body + 🔗 Book it). For now it carries the v2 fields with no
-    vote tally.
+        🎯 Book it now, dumbass
+
+        Jimmy Clay · Fri May 22
+        7:40 AM · 3 spots open
+
+    Pure: the caller supplies the headline (see `pick_headline`) so this
+    stays deterministic and testable. The 🔗 Book it link is a keyboard
+    button, not part of the text — see `build_keyboard_open`.
     """
+    import html as _html
+
+    spots = slot.spots_open
+    noun = "spot" if spots == 1 else "spots"
     return "\n".join([
-        "🎯 Gold Star",
+        f"🎯 {_html.escape(headline)}",
         "",
-        f"{course_display} · {_fmt_date(slot.tee_date)}",
-        f"{_fmt_time(slot.tee_time)} · {slot.spots_open} spots open",
+        f"{_html.escape(course_display)} · {_fmt_date(slot.tee_date)}",
+        f"{_fmt_time(slot.tee_time)} · {spots} {noun} open",
     ])
 
 
@@ -99,8 +156,8 @@ def render_status(state: dict, cfg: Config, today: date) -> str:
     last_scan_line = _stamp_line(
         "🔁 Last scan", state.get("last_poll_at"), now,
     )
-    last_digest_line = _stamp_line(
-        "📨 Last digest", state.get("last_digest_at"), now,
+    last_alert_line = _stamp_line(
+        "📨 Last alert", state.get("last_alert_at"), now,
         empty="— (none yet)",
     )
 
@@ -121,7 +178,7 @@ def render_status(state: dict, cfg: Config, today: date) -> str:
         else:
             lines.append(f"🌙 Quiet hours: outside {win_str} — scheduled scans paused")
     lines.append(last_scan_line)
-    lines.append(last_digest_line)
+    lines.append(last_alert_line)
     lines.append(f"🔔 Notifications: {'OFF (paused)' if paused else 'ON'}")
     return "\n".join(lines)
 
@@ -134,16 +191,23 @@ def render_full_listing(
     slots: list,    # list[RawSlot]; importing the type would create a cycle
     cfg: Config,
     run_at: datetime,
+    weather: dict[str, dict] | None = None,
 ) -> str:
     """Render every slot in `slots`, grouped by date then course.
 
+    This is the on-demand firehose (docs/SPEC.md > /full): all configured
+    courses, all times, not just the premium window and not just the
+    all-star set.
+
     Each (course, date) cell shows the count + up to
-    `_FULL_MAX_TIMES_PER_COURSE` earliest times. Output is truncated to fit
-    in a single Telegram message (4096-char limit) with a note when cut.
+    `_FULL_MAX_TIMES_PER_COURSE` earliest times. When a forecast is cached
+    it is appended to each date heading. Output is truncated to fit in a
+    single Telegram message (4096-char limit) with a note when cut.
     """
     import html as _html
     from collections import defaultdict
 
+    weather = weather or {}
     course_display: dict[str, str] = {c.key: c.display for c in cfg.courses}
 
     # date -> course_key -> list[RawSlot]
@@ -168,7 +232,8 @@ def render_full_listing(
         total += day_total
         dow = d.strftime("%a")
         date_str = f"{d.month}/{d.day}"
-        body_lines.append(f"<b>{dow} {date_str}</b> ({day_total})")
+        forecast = _forecast_suffix(d.isoformat(), weather)
+        body_lines.append(f"<b>{dow} {date_str}</b> ({day_total}){forecast}")
         for course_key in sorted(
             course_slots.keys(),
             key=lambda k: (-len(course_slots[k]), course_display.get(k, k)),
@@ -243,14 +308,16 @@ async def send_new_slot(
     chat_id: int,
     slot: TeeTimeSlot,
     course_display: str,
+    headline: str,
 ) -> int:
     """Send a Gold Star alert. Returns the Telegram message_id.
 
-    Nothing edits this message afterwards — a re-alert is a fresh message.
+    Nothing edits this message afterwards — a re-alert is a fresh message
+    with the new spot count (docs/SPEC.md > Re-alert semantics).
     """
     msg = await bot.send_message(
         chat_id=chat_id,
-        text=render_open(slot, course_display),
+        text=render_open(slot, course_display, headline),
         reply_markup=build_keyboard_open(slot),
         parse_mode=ParseMode.HTML,
         disable_web_page_preview=True,
@@ -263,77 +330,19 @@ async def send_new_slot(
 # --------------------------------------------------------------------------- #
 
 
-def render_digest(
-    matches: list[dict],
-    run_at: datetime,
-    next_run_at: datetime | None,
-    cfg: Config,
-    weather: dict[str, dict] | None = None,
-) -> str:
-    """Telegram-HTML listing of the current Gold Star matches.
+def _forecast_suffix(d_iso: str, weather: dict[str, dict]) -> str:
+    """e.g. '  ⛅ 87°/66° · Rain 12%', or '' when no forecast is cached.
 
-    v2: no bookings overlay and no roster — the bot tracks neither.
+    Appended to a /full date heading (docs/SPEC.md > Weather).
     """
-    weather = weather or {}
-    horizon = cfg.search.horizon_days
-
-    title = f"🏌️ <b>Tee Times</b> — {_fmt_clock(run_at)}"
-    n = len(matches)
-    subtitle = f"{n} slot{'s' if n != 1 else ''}"
-
-    sections: list[str] = [title, f"<i>{subtitle}</i>"]
-
-    if matches:
-        sorted_matches = sorted(matches, key=lambda x: (x["tee_date"], x["tee_time"]))
-        sections.append("")
-        for m in sorted_matches:
-            sections.append(_render_digest_line(m))
-
-        seen_dates: list[str] = []
-        for row in sorted_matches:
-            if row["tee_date"] not in seen_dates:
-                seen_dates.append(row["tee_date"])
-        sections.append("")
-        sections.append("<b>📅 Forecast</b>")
-        for d_iso in seen_dates:
-            sections.append(_render_forecast_line(d_iso, weather))
-    else:
-        sections.append("")
-        sections.append(f"No matches in the next {horizon} days.")
-        sections.append(f"Watching {len(cfg.courses)} course(s).")
-
-    sections.append("")
-    sections.append(_render_footer(run_at, next_run_at))
-    return "\n".join(sections)
-
-
-def _resolve_display(d: dict, cfg: Config | None) -> str:
-    """Return the course display name, preferring the current config so
-    edits to `display` in config.yaml take effect immediately on the
-    next render — even if `state.last_scan` still has stale strings."""
-    if cfg is not None:
-        c = cfg.course_by_key(d.get("course_key", ""))
-        if c is not None:
-            return c.display
-    return d.get("course_display", "")
-
-
-def _render_forecast_line(d_iso: str, weather: dict[str, dict]) -> str:
-    """e.g. 'Wed 5/20 · ⛅ 87°/66° · Rain 12%'"""
-    d = date.fromisoformat(d_iso)
-    dow = d.strftime("%a")
-    date_str = f"{d.month}/{d.day}"
     w = weather.get(d_iso)
-
-    parts = [f"<b>{dow} {date_str}</b>"]
-    if w:
-        emoji = _weather_emoji_from_dict(w)
-        tmax = int(round(float(w.get("tmax", 0))))
-        tmin = int(round(float(w.get("tmin", 0))))
-        rain = int(w.get("rain_pct", 0))
-        parts.append(f"{emoji} {tmax}°/{tmin}°")
-        parts.append(f"Rain {rain}%")
-    return " · ".join(parts)
+    if not w:
+        return ""
+    emoji = _weather_emoji_from_dict(w)
+    tmax = int(round(float(w.get("tmax", 0))))
+    tmin = int(round(float(w.get("tmin", 0))))
+    rain = int(w.get("rain_pct", 0))
+    return f"  {emoji} {tmax}°/{tmin}° · Rain {rain}%"
 
 
 def _weather_emoji_from_dict(w: dict | None) -> str:
@@ -341,74 +350,3 @@ def _weather_emoji_from_dict(w: dict | None) -> str:
         return ""
     from golfbot.weather import emoji_for
     return emoji_for(w.get("code"))
-
-
-def _short_time(t: time) -> str:
-    """Compact AM/PM, e.g. '7:30A' or '12:30P'. Saves chars on buttons."""
-    h = t.hour % 12 or 12
-    am_pm = "A" if t.hour < 12 else "P"
-    return f"{h}:{t.minute:02d}{am_pm}"
-
-
-def _render_digest_line(m: dict) -> str:
-    """One line per match. Format:
-    'Mon 5/18 · 7:30 AM · Roy Kizer · 3 open · Colby+Ed (Steve out) · $45 · <a>book</a>'.
-
-    v2: no grade badge — everything here already cleared the Gold Star bar,
-    so a per-row quality marker carries no information."""
-    import html as _html
-    tee_date = date.fromisoformat(m["tee_date"])
-    tee_time = time.fromisoformat(m["tee_time"])
-
-    dow = tee_date.strftime("%a")
-    d = f"{tee_date.month}/{tee_date.day}"
-    t = _fmt_time(tee_time)
-
-    course = _html.escape(m["course_display"])
-    players = m["players_available"]
-    price = m.get("price_usd")
-    price_str = f"${price:.0f}" if price else None
-
-    parts = [
-        f"{dow} {d}",
-        t,
-        course,
-        f"{players} open",
-    ]
-    if price_str:
-        parts.append(price_str)
-    parts.append(f'<a href="{_html.escape(m["booking_url"], quote=True)}">book</a>')
-    return " · ".join(parts)
-
-
-def _render_footer(run_at: datetime, next_run_at: datetime | None) -> str:
-    """Footer: relative time since the scan, relative time to next scan."""
-    now = datetime.now(run_at.tzinfo) if run_at.tzinfo else datetime.now()
-    last = _humanize_delta(int((now - run_at).total_seconds()))
-    if next_run_at:
-        next_delta = int((now - next_run_at).total_seconds())
-        nxt = _humanize_delta(next_delta)
-        return f"<i>Last scan: {last} · Next: {nxt}</i>  ·  /full · /pause · /help"
-    return f"<i>Last scan: {last}</i>  ·  /full · /pause · /help"
-
-
-async def send_digest(
-    bot: Bot,
-    chat_id: int,
-    matches: list[dict],
-    run_at: datetime,
-    next_run_at: datetime | None,
-    cfg: Config,
-    weather: dict[str, dict] | None = None,
-) -> int:
-    """Send the digest message; return Telegram message_id.
-
-    No keyboard — the per-row booking links live in the message text.
-    """
-    msg = await bot.send_message(
-        chat_id=chat_id,
-        text=render_digest(matches, run_at, next_run_at, cfg, weather=weather),
-        parse_mode=ParseMode.HTML,
-        disable_web_page_preview=True,
-    )
-    return msg.message_id

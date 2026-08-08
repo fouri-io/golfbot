@@ -71,7 +71,10 @@ async def inject(
     bot = Bot(token=bot_token)
     async with bot:
         course_display = cfg.course_by_key(course_key).display  # type: ignore[union-attr]
-        message_id = await notifier.send_new_slot(bot, chat_id, slot, course_display)
+        headline = notifier.pick_headline(cfg)
+        message_id = await notifier.send_new_slot(
+            bot, chat_id, slot, course_display, headline
+        )
 
     actions.record_alert(slot_in_state, now)
     await store.save_state(state_path, state)
