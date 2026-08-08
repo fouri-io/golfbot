@@ -17,11 +17,15 @@ courses:
   - { key: roy_kizer,             display: "Roy Kizer",       provider: golfatx, provider_id: 2,   all_star: true }
   - { key: riverside,             display: "Riverside",       provider: golfnow, provider_id: 888, all_star: true }
   - { key: grey_rock_golf_club,   display: "Grey Rock",       provider: golfnow, provider_id: 166, all_star: true }
-  - { key: morris_williams,       display: "Morris Williams", provider: golfatx, provider_id: 3 }
-  - { key: lions,                 display: "Lions",           provider: golfatx, provider_id: 4 }
-  - { key: golf-club-star-ranch,  display: "Star Ranch",      provider: golfnow, provider_id: 151 }
+  - { key: morris_williams,       display: "Morris Williams", provider: golfatx, provider_id: 3, all_star: true }
+  - { key: lions,                 display: "Lions",           provider: golfatx, provider_id: 4, all_star: true }
+  - { key: golf-club-star-ranch,  display: "Star Ranch",      provider: golfnow, provider_id: 151, all_star: true }
   - { key: falconhead_golf_club,  display: "Falconhead",      provider: golfnow, provider_id: 321 }
   - { key: avery_ranch_golf_club, display: "Avery Ranch",     provider: golfnow, provider_id: 206 }
+  - { key: teravista,             display: "Teravista",       provider: golfnow, provider_id: 99 }
+  - { key: crystal-falls-golf-club, display: "Crystal Falls", provider: golfnow, provider_id: 5741 }
+
+ 
 
 alerts:
   # Headline pool for Gold Star alerts. Picked at random, never repeating the
