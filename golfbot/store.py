@@ -34,7 +34,11 @@ def default_state() -> dict[str, Any]:
         "paused": False,
         "pause_started_at": None,
         "last_poll_at": None,
-        "tee_times": [],
+        "last_alert_at": None,
+        "next_run_at": None,
+        "tee_times": [],   # the Gold Star dedup + re-alert ledger
+        "raw_slots": [],   # last full scan, cached so /full is free
+        "weather": {},
     }
 
 

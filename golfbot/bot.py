@@ -285,11 +285,10 @@ async def cmd_full(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     ctx = _ctx(context)
 
     state = store.load_state(ctx.state_path)
-    last = state.get("last_scan") or {}
-    raw_dicts = last.get("raw_slots")
+    raw_dicts = state.get("raw_slots")
 
     if raw_dicts:
-        run_at_iso = last.get("run_at")
+        run_at_iso = state.get("last_poll_at")
         from datetime import datetime as _dt
         run_at = _dt.fromisoformat(run_at_iso) if run_at_iso else ctx.now()
         slots = [RawSlot.from_dict(d) for d in raw_dicts]

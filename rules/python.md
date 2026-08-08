@@ -23,8 +23,8 @@ Applies to everything under `golfbot/` and `tests/`.
 
 ## Structure
 
-- **Pure by default.** `pipeline`, `grading`, `horizon`, `actions`, and the
-  render half of `notifier` do no I/O and must stay that way. They're the
+- **Pure by default.** `pipeline`, `horizon`, `actions`, and the render half
+  of `notifier` do no I/O and must stay that way. They're the
   parts that are cheap to test; keeping them pure is what makes the tests
   cheap.
 - Network access belongs in `providers/` and `weather.py`. Filesystem access
@@ -45,10 +45,10 @@ behavior.
 
 ## Known debt — don't replicate
 
-- **Function-local imports** in `bot.py` and `scanner.py`
+- **Function-local imports** in `bot.py`
   (`from golfbot import scanner as _scanner` inside a handler) work around
   import cycles. They are not a pattern to copy. New code should import at
   module top; if that creates a cycle, the module boundary is wrong.
-- `bot.py` (1042 lines) and `notifier.py` (799) are oversized and slated for
-  splitting. Don't add to them without asking whether the new code belongs in
-  a new module.
+- `bot.py` and `notifier.py` were the two oversized modules; the v2 pivot cut
+  them roughly in half. They're still the biggest files here — before adding to
+  either, ask whether the new code belongs in a new module.

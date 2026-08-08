@@ -48,7 +48,7 @@ class RawSlot:
         }
 
     @classmethod
-    def from_dict(cls, d: dict) -> "RawSlot":
+    def from_dict(cls, d: dict) -> RawSlot:
         return cls(
             course_key=d["course_key"],
             tee_date=date.fromisoformat(d["tee_date"]),

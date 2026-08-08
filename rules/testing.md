@@ -9,8 +9,8 @@ no decorator.
 ```bash
 pytest                                   # everything
 pytest tests/test_pipeline.py -v         # one file
-pytest tests/test_pipeline.py::test_policy_b_prefers_higher_grade -v
-pytest -k policy_b                       # by name
+pytest tests/test_pipeline.py::test_rejects_weekend -v
+pytest -k gold_star                      # by name
 ```
 
 ## Hard rules
@@ -23,27 +23,38 @@ pytest -k policy_b                       # by name
   that's live state for a bot three people are actually using.
 - **No Telegram calls.** Test the render functions, which are pure. The
   `send_*` coroutines are thin wrappers; if one needs coverage, fake the `Bot`.
-- **Freeze time.** Anything reading "now" takes it as a parameter or gets it
-  from an injected clock. Tests that depend on the wall clock fail at midnight,
-  on a Sunday, or in a different month.
+- **Freeze time, or derive from it.** Anything reading "now" takes it as a
+  parameter or gets it from an injected clock. Where that isn't possible —
+  `scan_and_notify` reads the wall clock to compute its horizon — derive the
+  test's dates from the *live* horizon rather than hardcoding them, so the test
+  doesn't rot as the calendar moves. See `tests/test_scanner.py`.
+- **Disable weather on test configs.** `scan_and_notify` refreshes the forecast
+  from Open-Meteo when the cache is stale. Pass a config with
+  `weather=None` or the suite makes a real HTTP call.
 
 ## What deserves a test
 
-The pure modules are where tests pay for themselves — `pipeline`, `grading`,
-`horizon`, `actions`, `availability`, `models`. Same input, same output, no
-setup.
+The pure modules are where tests pay for themselves — `pipeline`, `horizon`,
+`actions`, `models`. Same input, same output, no setup.
 
-Bias toward **table-driven** cases for anything with windows or thresholds:
-grading boundaries are inclusive on both ends, so the exact-boundary case is
-the one that breaks.
+The two rules deserve the most coverage: **what qualifies**
+(`pipeline.qualifies`) and **what's worth announcing** (`actions.should_alert`).
+Test each condition failing on its own, not just the happy path.
+
+Bias toward **table-driven** cases for anything with windows or thresholds: the
+premium window is inclusive on both ends, so the exact-boundary case is the one
+that breaks.
 
 Always cover:
 
 - Empty results (a provider returning nothing is normal, not exceptional).
-- Boundary times at the exact edge of `ideal` and `acceptable`.
-- Round-tripping — `to_dict` → `from_dict` must be lossless. Availability
-  currently has a **failing round-trip test**; that class of bug is exactly
-  why these exist.
+- Boundary times at the exact edge of `premium_window` — inclusive on both
+  ends, so 07:20 and 08:00 both qualify.
+- Round-tripping — `to_dict` → `from_dict` must be lossless. A silent
+  round-trip bug in the availability layer went unnoticed for months before
+  the module was deleted; that class of bug is exactly why these exist.
+- Anything randomised (headline picking) gets a **seeded RNG**, never a bare
+  `random`. Assert the property, not one lucky draw.
 
 ## Adding a provider fixture
 

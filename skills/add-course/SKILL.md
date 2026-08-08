@@ -24,18 +24,19 @@ uniqueness and will refuse to load on a duplicate.
 In `config.yaml` under `courses:`:
 
 ```yaml
-- { key: new_course, display: "New Course", tier: 1, provider: golfnow, provider_id: 1234 }
+- { key: new_course, display: "New Course", provider: golfnow, provider_id: 1234, all_star: true }
 ```
 
-`tier` drives grading and is the group's judgment about the course, not a fact
-about it:
+`all_star` is the only quality knob, and it is the group's judgment about the
+course, not a fact about it:
 
-- **tier 1** — ideal window → grade **A**, acceptable window → **B**
-- **tier 2** — ideal → **B**, acceptable → **C**
-- **tier 3** — not graded at all; it will never notify
+- **`all_star: true`** — can fire a Gold Star alert. Four courses hold this
+  today; adding a fifth makes the bot louder.
+- **omitted (default `false`)** — still scanned and still shown in `/full`,
+  but can never ping.
 
-Ask which tier rather than guessing. Getting it wrong either floods the digest
-or silences the course entirely.
+**Ask which one rather than guessing.** Marking a course all-star when the group
+wouldn't actually drop everything for it is how a scanner earns a mute.
 
 ## 3. GolfATX only — extend the name map
 
@@ -55,8 +56,8 @@ spelling exactly.
 ```
 
 `--raw` first. If raw returns rows but the filtered run is empty, the course is
-working and the filters are doing their job (wrong tier, outside the time
-window, below `notify_min_grade`) — that's not a bug.
+working and the Gold Star rule is doing its job — not all-star, outside the
+premium window, a weekend, or zero open spots. That's not a bug.
 
 If raw returns nothing:
 
@@ -95,4 +96,4 @@ Implement the `Provider` protocol in `providers/base.py`: a `name` attribute and
 - [ ] `golfbot scrape --course <key>` returns rows (or the absence is explained)
 - [ ] Fixture committed and a parse test passes
 - [ ] `ruff check .` and `pytest` are clean
-- [ ] Tier confirmed with the user, not assumed
+- [ ] `all_star` confirmed with the owner, not assumed

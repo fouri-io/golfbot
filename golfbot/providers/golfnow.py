@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 import time as _time_mod
 from dataclasses import dataclass
-from datetime import date, datetime, time, timezone
+from datetime import UTC, date, datetime, time
 from typing import Any
 
 import httpx
@@ -268,4 +268,4 @@ def _coerce_float(v: Any) -> float | None:
 
 def _now_iso() -> str:
     # GolfNow expects the trailing Z; isoformat() gives +00:00 — swap it.
-    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    return datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")

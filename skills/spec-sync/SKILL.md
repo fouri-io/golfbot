@@ -48,22 +48,27 @@ says.
 a future reader would ask "why is it like this?" about — add an ADR under
 `docs/decisions/`. Spec says *what*; ADRs say *why*.
 
-## Known stale areas
+## Things that are decisions, not gaps
 
-Flag rather than silently "fixing" these — each represents a real intent
-question, and the SPEC is pending an intent revision:
+If the spec seems to be "missing" one of these, it isn't. They were removed
+deliberately in the v2 Gold Star pivot
+([ADR 0006](../../docs/decisions/0006-gold-star-pivot.md)) after months of
+production use showed the group never used them. Re-adding any of them is an
+intent change that needs the owner's sign-off, not a spec gap to fill:
 
-- **`❌ No` vote semantics.** SPEC says a No vote means "out for the whole day"
-  and triggers 2-player expansion. Superseded in practice by
-  [ADR 0004](../../docs/decisions/0004-availability-weekly-pattern.md) —
-  availability now comes from `/out`, not votes.
-- **`days_of_week`.** Still validated in config, no longer read by the
-  pipeline. Advisory only.
-- **Two notification models.** SPEC documents the per-slot voting model; the
-  digest model is what actually runs. See
-  [ADR 0005](../../docs/decisions/0005-two-notification-models.md).
-- **Repo layout section.** Predates `docs/`, `rules/`, and `skills/`.
-- **Phasing.** P1–P3 are complete; SPEC still reads as forward-looking.
+- **In-bot voting** — `✅ Yes` / `❌ No`, vote tallies, roster display
+- **Per-member availability** — `/out`, `/in`, `/avail`, player-count-driven
+  search expansion
+- **Booking tracking** — `📖 Booked it`, `/unbook`, `bookings.jsonl` writes
+- **Grading** — A/B/C grades, course tiers, ideal-vs-acceptable windows
+- **The digest** — one message listing every match. v2 pushes one alert per
+  qualifying slot instead, and `/full` covers the on-demand listing.
+
+The one remaining known inconsistency: SPEC's literal alert mock shows
+`🎯 Book it now, dumbass`, while the starter pool in the same document lists
+that headline with a trailing `⛳`. The code renders pool entries verbatim, so
+the emoji appears. Fix is one character in `config.yaml` if the mock should
+win — don't add emoji-stripping to the renderer.
 
 ## Reminder
 

@@ -160,6 +160,10 @@ def render_status(state: dict, cfg: Config, today: date) -> str:
         "📨 Last alert", state.get("last_alert_at"), now,
         empty="— (none yet)",
     )
+    next_scan_line = _stamp_line(
+        "⏭ Next scan", state.get("next_run_at"), now,
+        empty="— (not scheduled)",
+    )
 
     lines = [
         f"📡 Watching: {course_names}",
@@ -178,6 +182,7 @@ def render_status(state: dict, cfg: Config, today: date) -> str:
         else:
             lines.append(f"🌙 Quiet hours: outside {win_str} — scheduled scans paused")
     lines.append(last_scan_line)
+    lines.append(next_scan_line)
     lines.append(last_alert_line)
     lines.append(f"🔔 Notifications: {'OFF (paused)' if paused else 'ON'}")
     return "\n".join(lines)

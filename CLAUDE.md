@@ -5,22 +5,24 @@ Guidance for Claude Code working in this repository.
 ## Project Overview
 
 **Project:** golfbot
-**Purpose:** Get three friends onto a good Austin tee time without anyone
-refreshing a booking site. The bot watches availability and posts to Telegram
-only when something changed that's worth acting on.
+**Purpose:** Get three friends onto a great Austin tee time without anyone
+refreshing a booking site. The bot watches availability and pings Telegram
+**only** for a Gold Star — an all-star course, at a premium time, on a weekday.
+It stays silent otherwise.
 **Owner:** Colby ([@fouri-io](https://github.com/fouri-io))
 **Status:** See [README.md](README.md#status) — the single source of truth for
-what phase is done. Do not restate status here; that's how this file went stale
+what's shipped. Do not restate status here; that's how this file went stale
 before.
 
 It is a personal convenience tool for a fixed group of three, self-hosted, and
 has been running in production for several months. It is not a product and has
 no users beyond the group.
 
-> ⚠️ **The SPEC is mid-revision.** The owner is reworking golfbot's *intent*,
-> not just its structure. Treat [`docs/SPEC.md`](docs/SPEC.md) as describing
-> the current system, not necessarily the intended one — and raise
-> intent questions rather than resolving them yourself.
+golfbot is a **pure scanner**. It notifies; it never books. The group
+coordinates and books offline. v2 deliberately deleted in-bot voting,
+per-member availability, booking tracking and A/B/C grading — months of
+production use showed the group never used them
+([ADR 0006](docs/decisions/0006-gold-star-pivot.md)).
 
 ## Architecture & Structure
 
@@ -64,13 +66,16 @@ caffeinate -i .venv/bin/golfbot run    # on macOS — see Known Quirks
 # Preview a scan without Telegram or persistence
 golfbot scrape
 golfbot scrape --course roy_kizer --date 2026-05-21
-golfbot scrape --raw          # skip filters — is the provider returning anything?
+golfbot scrape --raw          # skip the rule — is the provider returning anything?
+
+# Send one synthetic Gold Star (POSTS TO THE LIVE CHAT)
+golfbot mock --course roy_kizer --date 2026-05-22 --time 07:40 --spots 3
 
 # Test
 pytest                                          # all
 pytest tests/test_pipeline.py -v                # one file
 pytest tests/test_pipeline.py::test_name -v     # one test
-pytest -k policy_b                              # by name
+pytest -k gold_star                             # by name
 
 # Lint
 ruff check .
@@ -92,8 +97,8 @@ mandatory.
 | HTTP | `httpx`, `curl_cffi` | curl_cffi only for Cloudflare — [ADR 0002](docs/decisions/0002-curl-cffi-for-cloudflare.md) |
 | Parsing | BeautifulSoup + lxml | WebTrac HTML |
 | Storage | Flat JSON files | No database — [ADR 0001](docs/decisions/0001-flat-files-over-database.md) |
-| Lint | ruff (`E,F,I,B,UP,SIM`, line 100) | |
-| Tests | pytest, `asyncio_mode=auto` | 205 tests; **1 currently failing** |
+| Lint | ruff (`E,F,I,B,UP,SIM`, line 100) | Clean — keep it that way |
+| Tests | pytest, `asyncio_mode=auto` | All green; no live network anywhere |
 | CI | none yet | Planned |
 
 Detailed standards live in [`rules/`](rules/) — read the relevant one before
@@ -168,8 +173,10 @@ Surface key decisions for explicit confirmation rather than deciding silently.
   owner review the diff first. Never push to `origin/main` unprompted.
 - Before deleting files, or deleting anything under `data/` — it's live state
   and is not backed up
-- Before extending or removing either half of the two notification models
-  ([ADR 0005](docs/decisions/0005-two-notification-models.md))
+- Before adding a **new push notification**. The Gold Star alert is deliberately
+  the only one; silence is the feature. Anything else goes behind a command.
+- Before re-introducing anything ADR 0006 deleted (voting, availability,
+  booking tracking, grading). Those are decisions, not gaps.
 
 🔴 **Never do**
 
@@ -203,7 +210,7 @@ Before presenting any change:
 - [ ] Compared row counts before and after a filter change, and explained any drop
 - [ ] Spot-checked 3 parsed slots against the raw response
 - [ ] Empty results handled as normal, not as an error
-- [ ] Boundary times at the exact edge of `ideal`/`acceptable` tested
+- [ ] Boundary times at the exact edge of `premium_window` tested (inclusive both ends)
 
 ## Context I Want Claude to Know
 
@@ -239,20 +246,13 @@ intent.
 - **A GolfATX course missing from `WEBTRAC_NAME_BY_CODE`** returns zero slots
   with only a log warning. This is the most common "why is this course empty?"
   cause.
-- **`data/` is gitignored and unbacked.** Availability and bookings live only
-  there.
-
-### Known-wrong things (do not "fix" silently — they're pending intent review)
-
-- One failing test: `tests/test_availability.py::test_load_save_roundtrip`.
-  Looks like a genuine round-trip bug, not a stale test.
-- 19 ruff violations outstanding.
-- `search.days_of_week` is validated in config but no longer read by the
-  pipeline — advisory only.
-- README describes the admin availability gate as on by default;
-  `config.py` defaults `admin_required` to `False`. Code is authoritative.
-- `docs/SPEC.md` has stale sections (repo layout, phasing, `❌ No` vote
-  semantics) — see `/spec-sync` for the list.
+- **`data/` is gitignored and unbacked.** The Gold Star ledger lives only there;
+  wiping it means every currently-open slot re-alerts once.
+- **The bot registers zero callback handlers.** v2's only button is a URL
+  button. If you add a callback button you must add its handler too — there is
+  no fallback handler to catch it.
+- **`{name}` in a headline** is substituted at send time from the roster. A
+  headline pool entry is config copy, not code.
 
 ### Active decisions
 
@@ -260,12 +260,13 @@ Full records in [`docs/decisions/`](docs/decisions/). In force:
 
 - Flat JSON files over a database — single writer, atomic rename
 - `curl_cffi` for WebTrac; `httpx` everywhere else
-- Policy B: one best slot per course+date, and digests only on real change
-- Availability is a weekly pattern plus per-date overrides, not config
+- Gold Star rule: all-star course + premium window + weekday + >=1 spot, and
+  re-alert only when open spots increase
+- Scan every course, alert on the four all-stars, so `/full` stays complete
 
-Unresolved: **two parallel notification models** (per-slot voting vs digest),
-with two booking stores that never reconcile. Only the digest is live. Ask
-before touching either.
+Superseded, kept for history — do not build on them: ADR 0003 (grading and
+best-per-course-date) and ADR 0004 (availability layer), both retired by
+[ADR 0006](docs/decisions/0006-gold-star-pivot.md).
 
 ### People
 

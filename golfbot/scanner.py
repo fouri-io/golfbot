@@ -97,12 +97,12 @@ async def scan_and_notify(
     force: bool = False,
 ) -> dict[str, Any]:
     """Scheduled-run entrypoint. Polls, folds Gold Stars into the ledger,
-    and sends one alert per slot that is due. Returns the new last_scan
-    dict for inspection/tests.
+    and sends one alert per slot that is due.
 
-    Fetches RAW slots for every date in horizon and caches them in
-    state.last_scan.raw_slots. This makes /full free of fresh API calls.
-    The Gold Star rule is applied client-side on top of the cached slots.
+    Returns a summary dict for inspection/tests — this is NOT the persisted
+    shape. State is written to `state.json` per docs/SPEC.md > Data model:
+    raw slots cached under `raw_slots` so /full costs no API calls, and the
+    ledger under `tee_times`.
     """
     now = datetime.now(cfg.tz)
 
@@ -115,9 +115,7 @@ async def scan_and_notify(
                 "scan: outside active window %s-%s; skipping",
                 win.start.strftime("%H:%M"), win.end.strftime("%H:%M"),
             )
-            return (
-                store.load_state(state_path).get("last_scan") or {}
-            )
+            return {"skipped": "outside active window", "matches": [], "alerts_sent": 0}
 
     today = now.date()
     start, end = current_window(
@@ -168,12 +166,9 @@ async def scan_and_notify(
                 log.warning("weather: fetch failed; using existing cache if any", exc_info=True)
 
     current_dicts = [match_to_dict(m) for m in matches]
-    last_scan: dict[str, Any] = {
-        "run_at": now.isoformat(),
-        "matches": current_dicts,
-        "raw_slots": raw_dicts,
-        "next_run_at": next_run_at.isoformat() if next_run_at else None,
-    }
+    # Cached so /full costs no API calls (docs/SPEC.md > Data model).
+    state["raw_slots"] = raw_dicts
+    state["next_run_at"] = next_run_at.isoformat() if next_run_at else None
 
     # Fold every Gold Star into the ledger, then alert on the ones the
     # re-alert rule says are worth a push (docs/SPEC.md > Re-alert semantics).
@@ -185,11 +180,11 @@ async def scan_and_notify(
         if actions.should_alert(slot_in_state):
             due.append(slot_in_state)
 
+    sent = 0
     if paused:
         if due:
             log.info("scan: %d slot(s) due to alert but notifications are paused", len(due))
     else:
-        sent = 0
         for slot_in_state in due:
             try:
                 slot = TeeTimeSlot.from_dict(slot_in_state)
@@ -210,9 +205,13 @@ async def scan_and_notify(
         if sent:
             log.info("scan: sent %d Gold Star alert(s)", sent)
 
-    state["last_scan"] = last_scan
     await store.save_state(state_path, state)
-    return last_scan
+    return {
+        "run_at": now.isoformat(),
+        "matches": current_dicts,
+        "raw_slots": raw_dicts,
+        "alerts_sent": sent,
+    }
 
 
 def _course_display(cfg: Config, course_key: str) -> str:

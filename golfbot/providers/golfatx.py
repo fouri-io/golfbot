@@ -85,7 +85,9 @@ class GolfATXProvider:
         started = _time_mod.monotonic()
 
         try:
-            async with AsyncSession(impersonate=_IMPERSONATE, timeout=self.timeout_seconds) as session:
+            async with AsyncSession(
+                impersonate=_IMPERSONATE, timeout=self.timeout_seconds
+            ) as session:
                 token = await _harvest_csrf_token(session)
                 html = await _do_search(session, token, target_date, min_players)
         except RequestException as e:

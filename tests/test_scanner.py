@@ -236,3 +236,28 @@ async def test_scan_caches_all_raw_slots_including_non_all_star(cfg, tmp_path, w
     cached = {(s["course_key"], s["tee_time"]) for s in result["raw_slots"]}
     assert ("lions", "07:40:00") in cached
     assert ("roy_kizer", "14:00:00") in cached
+
+
+async def test_raw_slots_persist_at_top_level(cfg, tmp_path, weekday):
+    """docs/SPEC.md > Data model puts raw_slots at the root of state.json —
+    /full reads it from there, and there is no `last_scan` wrapper."""
+    p = tmp_path / "state.json"
+    await _scan(cfg, p, [_raw(weekday)])
+    state = store.load_state(p)
+    assert isinstance(state["raw_slots"], list)
+    assert state["raw_slots"], "cache must be populated for /full"
+    assert "last_scan" not in state
+
+
+async def test_scan_records_poll_and_next_run_stamps(cfg, tmp_path, weekday):
+    p = tmp_path / "state.json"
+    providers = {"golfatx": FakeProvider([_raw(weekday)]), "golfnow": FakeProvider([])}
+    next_run = datetime.now(cfg.tz) + timedelta(minutes=60)
+    await scan_and_notify(
+        cfg=cfg, providers=providers, state_path=p, bot=FakeBot(),
+        chat_id=-1, force=True, next_run_at=next_run,
+    )
+    state = store.load_state(p)
+    assert state["last_poll_at"] is not None
+    assert state["next_run_at"] == next_run.isoformat()
+    assert state["last_alert_at"] is not None

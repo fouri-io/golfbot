@@ -10,14 +10,26 @@ See [docs/SPEC.md](docs/SPEC.md) for the full design, and
 
 ## Status
 
-- **P1** ✅ Telegram bot harness (commands, callbacks, persistent state)
-- **P2a** ✅ GolfNow provider
-- **P2b** ✅ GolfATX/WebTrac provider (via `curl_cffi` for Cloudflare bypass)
-- **P3** ✅ Scheduled scans + Telegram digest notifications
-- **v2** 🚧 Gold Star pivot — scanner-only; retire voting/availability/booking
-  ([ADR 0006](docs/decisions/0006-gold-star-pivot.md), specced, implementing in slices)
+- **v2 Gold Star** ✅ shipped — scanner-only. Voting, per-member availability,
+  in-bot booking and A/B/C grading are gone
+  ([ADR 0006](docs/decisions/0006-gold-star-pivot.md)).
+- Providers: GolfNow ✅ · GolfATX/WebTrac ✅ (via `curl_cffi` for Cloudflare)
+- Scheduled scans ✅ · Gold Star alerts ✅ · `/full` firehose ✅
 
-Next: v2 refactor slices 1–5 (see [SPEC.md](docs/SPEC.md#implementation-slices-v2-refactor)).
+## The Gold Star rule
+
+You get pinged **only** when all four hold:
+
+| Condition | Value |
+|---|---|
+| Course | in the all-star set — Jimmy Clay, Roy Kizer, Riverside, Grey Rock |
+| Tee time | inside `premium_window` (default 07:20–08:00) |
+| Day | weekday, Mon–Fri |
+| Open spots | ≥ 1 |
+
+Every configured course is still scanned so `/full` shows everything; only the
+four all-stars can fire an alert. A slot re-alerts only if it reappears with
+**more** open spots than last announced — otherwise it stays silent.
 
 ## Setup
 
@@ -39,118 +51,81 @@ cp .env.example .env
 
 ## Usage
 
-### Scrape (P2 — preview real availability)
-
-The scrape command runs the providers, applies filters (day-of-week,
-time-window, grade), applies Policy B dedup (best per course-date), and
-prints what *would* fire as a notification.
+### Run the bot
 
 ```bash
-# Full preview: every configured course × 7-day horizon
-golfbot scrape
-
-# Scope to one course (debugging or sanity check)
-golfbot scrape --course riverside
-golfbot scrape --course grey_rock_golf_club
-golfbot scrape --course roy_kizer
-
-# Scope to one date
-golfbot scrape --date 2026-05-21
-golfbot scrape --course morris_williams --date 2026-05-19
-
-# See unfiltered API output (skip pipeline filters)
-golfbot scrape --raw
-golfbot scrape --course morris_williams --date 2026-05-19 --raw
-
-# Override player count (default 3; try 2 for expansion-case preview)
-golfbot scrape --players 2
-
-# Full help
-golfbot scrape --help
-```
-
-Output shows live per-fetch progress, a funnel summary, and the final
-matches that would notify.
-
-### Telegram bot — scheduled mode (P3)
-
-```bash
-# Start the bot: APScheduler runs scans on a cadence + Telegram listens for
-# commands. First scan fires within ~10s, then on the configured interval.
+# APScheduler runs scans on a cadence + Telegram listens for commands.
 golfbot run
 
-# On a MacBook, wrap with `caffeinate -i` so macOS doesn't sleep the
-# event loop mid-schedule:
+# On any Mac, wrap with `caffeinate -i` so macOS doesn't sleep the event
+# loop mid-schedule:
 caffeinate -i .venv/bin/golfbot run
 ```
 
-**About `caffeinate`** (macOS): a built-in that holds a sleep assertion
-while the wrapped process runs. `-i` prevents *idle sleep*. When you
-Ctrl-C the bot, the assertion releases.
+**About `caffeinate`** (macOS): a built-in that holds a sleep assertion while
+the wrapped process runs. `-i` prevents *idle sleep*; Ctrl-C releases it.
 
-**Use it on every Mac** (laptop or mini). Even on a Mac mini that's
-configured to never sleep at the OS level, wrapping the bot with
-`caffeinate -i` is the defensive default: if pmset config gets reset
-(OS update, factory reset, etc.) the bot keeps its sleep assertion
-process-scoped, so scheduled scans don't silently start dropping.
-Zero CPU cost; no downside.
+Use it on a laptop **and** on a Mac mini. Even where the OS is configured never
+to sleep, wrapping the bot keeps the assertion process-scoped, so a reset pmset
+config (OS update, factory reset) can't silently stop scheduled scans. Zero CPU
+cost, no downside.
 
-Lid-close sleep on a MacBook is *separate* from idle sleep and overrides
-`-i`. To keep running with the lid closed, also be on AC power and use
-`caffeinate -is` (or adjust pmset).
+Lid-close sleep on a MacBook is *separate* from idle sleep and overrides `-i`.
+To keep running with the lid shut, be on AC power and use `caffeinate -is`.
 
-Once running, the bot posts a **digest message** to the group whenever the
-match set changes — same shape as `scrape` output, one row per matching
-slot with an inline "book" link. Notifications are deduplicated: if a poll
-returns the same slots as the previous one, no new message fires.
+### Commands
 
-Commands (DM the bot or send in the group):
+| Command | Who | Effect |
+|---|---|---|
+| `/full` | anyone | Every open slot in horizon — all courses, all times |
+| `/scan` | anyone | Force a scan right now |
+| `/status` | anyone | All-star set, premium window, last/next scan |
+| `/courses` | anyone | All scanned courses (⭐ = can alert) |
+| `/pause` | admin | Mute alerts |
+| `/resume` | admin | Unmute |
+| `/garmin` | admin | Run the sibling garmin-golf update script |
+| `/whoami` | anyone | Your Telegram user ID (for onboarding) |
+| `/help` | anyone | Command list |
 
-| Command | Effect |
-|---|---|
-| `/tee` | Re-display the most recent scan's matches |
-| `/status` | Bot state — horizon, pause flag, last poll |
-| `/courses` | List courses being scanned |
-| `/avail` | Show next-7-days availability grid for registered members |
-| `/out <date> [date ...]` | Mark yourself OUT for one or more dates |
-| `/in  <date> [date ...]` | Mark yourself back IN |
-| `/pause` | Mute auto-scan notifications (admin) |
-| `/resume` | Unmute (admin) |
-| `/whoami` | Your Telegram user ID (used for adding to roster) |
-| `/help` | Command list |
+The **only** button anywhere is the `🔗 Book it` link on an alert. There are no
+vote, confirm or cancel buttons — booking happens offline.
 
-Date arg formats accepted by `/out` / `/in`: `mon`/`tue`/.../`sun` (next
-occurrence, or today if same-day), `today`, `tomorrow`, ISO `2026-05-20`,
-or `M/D` like `5/20`.
+### Preview a scan from the terminal
 
-**Availability behavior:** the scanner consults each member's availability
-per date. By default, the **admin** (`group.admin` in config) gating is on
-— if the admin is out for a date, the scanner skips it entirely. For dates
-the admin is in, the scanner queries providers with `min_players` set to
-the count of available registered members, so missing players don't force
-us to look for impossible-to-fill foursomes. Set `group.admin_required:
-false` in config to disable the admin gate.
-
-Members with `telegram_user_id: 0` in config are considered placeholders
-and are not counted in availability calculations — they need to register
-via `/whoami` first.
-
-### Telegram bot — synthetic injection (P1 testing)
+`scrape` applies the same Gold Star rule the scheduler uses, then prints what
+*would* alert. No Telegram, no state written.
 
 ```bash
-# Send a fake tee-time notification (per-slot voting model, separate from digest)
-golfbot mock --course roy_kizer --date 2026-05-23 --time 08:00 --players 4 --grade A
+golfbot scrape                              # full horizon, every course
+golfbot scrape --course roy_kizer           # scope to one course
+golfbot scrape --date 2026-05-21            # scope to one date
+golfbot scrape --raw                        # unfiltered — skip the rule entirely
+golfbot scrape --players 2                  # min open spots to query with
+golfbot scrape --help
 ```
 
-This sidesteps providers and the digest path — it sends a single per-slot
-message with Yes/No vote buttons. Used for testing the group-voting UX
-without depending on real availability.
+Use `--raw` first when a course looks empty: if raw returns rows but the
+filtered run doesn't, the rule is doing its job (not all-star, outside the
+window, or a weekend) — that's not a bug.
+
+### Send a test alert
+
+```bash
+golfbot mock --course roy_kizer --date 2026-05-22 --time 07:40 --spots 3
+```
+
+Sidesteps the providers and pushes one synthetic Gold Star to the group, so you
+can check the alert renders without waiting for a real cancellation. **This
+posts to the live chat.**
 
 ### Tests
 
 ```bash
-pytest                       # all tests
-pytest tests/test_pipeline.py -v
+pytest                                          # all
+pytest tests/test_pipeline.py -v                # one file
+pytest tests/test_pipeline.py::test_name -v     # one test
+pytest -k gold_star                             # by name
+ruff check .
 ```
 
 ## Layout

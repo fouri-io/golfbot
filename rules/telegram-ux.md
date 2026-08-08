@@ -19,35 +19,38 @@ exists to prevent.
 
 - **Times** are stored as ISO 8601 with an `America/Chicago` offset and always
   displayed in CT. Never render a naive datetime to a user.
-- **Tee-time IDs** are deterministic:
-  `{course_key}:{YYYY-MM-DD}:{HHMM}:{players}`. The same physical slot yields
-  the same id across polls, which is what makes dedup trivial. Don't add
-  randomness, timestamps, or a counter to an id.
-- **Admin-only actions** (`/pause`, `/resume`, `/unbook`, booking confirmation)
-  check `config.group.admin`. Taps from non-roster users are **silently
-  ignored** — no error reply. Don't "helpfully" tell a stranger they lack
-  permission.
-- **Callback data** is parsed defensively. An old message's buttons can be
-  tapped days later, after the underlying state is gone; handle the miss
-  rather than raising.
+- **Tee-time IDs** are deterministic: `{course_key}:{YYYY-MM-DD}:{HHMM}`. The
+  same physical slot yields the same id across polls, which is what makes
+  dedup trivial. The **spot count is deliberately not part of the id** — a slot
+  going 2 → 3 spots is the same slot with more availability. Don't add
+  randomness, timestamps, a counter, or the spot count to an id.
+- **Admin-only actions** (`/pause`, `/resume`, `/garmin`) check
+  `config.group.admin`. Taps from non-roster users are **silently ignored** —
+  no error reply. Don't "helpfully" tell a stranger they lack permission.
+- **There are no callback buttons.** The only button anywhere is the `🔗 Book it`
+  URL link, which produces no callback data, so the bot registers zero
+  `CallbackQueryHandler`s. If you add a callback button you must add its handler
+  too — nothing will catch it otherwise.
 
 ## Noise discipline
 
-The single most valuable property of this bot is that it stays quiet.
+The single most valuable property of this bot is that it stays quiet. A scanner
+that cries wolf gets muted, and then it's worthless.
 
-- Digests fire only when the match set actually changes
-  ([ADR 0003](../docs/decisions/0003-policy-b-best-per-course-date.md)).
-- Prefer **editing** an existing message to sending a new one.
+- The **Gold Star alert is the only push**. Everything else is on demand
+  behind a command. Adding a second push type needs the owner's sign-off.
+- A slot re-alerts only when it reappears with **more** open spots than last
+  announced. Equal or fewer is silence
+  ([SPEC > Re-alert semantics](../docs/SPEC.md)).
 - Before adding any new proactive message, answer: what does the group do
   differently on receiving it? If there's no answer, it's noise.
 
-## Two notification models exist
+## Snark is data, not code
 
-`notifier.py` serves both the per-slot voting model and the digest model. They
-are **not** layered, and only the digest is live. Read
-[ADR 0005](../docs/decisions/0005-two-notification-models.md) before touching
-`notifier.py` so you extend the right one — the split is unresolved, so ask
-rather than picking.
+Alert headlines live in `alerts.headlines` in `config.yaml` so copy can change
+without touching code. `{name}` is substituted at send time from the roster.
+Keep the pool in config; don't hardcode copy in `notifier.py` beyond the single
+fallback used when the pool is empty.
 
 ## Testing
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import random
 from dataclasses import replace
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from itertools import pairwise
 from pathlib import Path
 
@@ -247,6 +247,20 @@ def test_render_status_lists_the_all_star_set(cfg):
 def test_render_status_has_no_bookings_line(cfg):
     out = render_status(default_state(), cfg, today=date(2026, 5, 15))
     assert "Bookings" not in out
+
+
+def test_render_status_shows_next_scan(cfg):
+    """SPEC v2 > Telegram commands: /status reports last AND next scan."""
+    state = default_state()
+    state["next_run_at"] = (datetime.now(cfg.tz) + timedelta(minutes=42)).isoformat()
+    out = render_status(state, cfg, today=date(2026, 5, 15))
+    next_line = next(ln for ln in out.splitlines() if ln.startswith("⏭"))
+    assert "in 41m" in next_line or "in 42m" in next_line
+
+
+def test_render_status_next_scan_unscheduled(cfg):
+    out = render_status(default_state(), cfg, today=date(2026, 5, 15))
+    assert "⏭ Next scan: — (not scheduled)" in out
 
 
 def test_render_status_paused(cfg):
