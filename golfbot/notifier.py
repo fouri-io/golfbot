@@ -8,7 +8,7 @@ at the bottom call the bot.
 Callback-data format: ``"{action}:{slot_id}"`` where action is one of
 ``yes``, ``no``, ``book``, ``skip``, ``pause``, ``undo``.
 
-See SPEC.md > Notification mocks.
+See docs/SPEC.md > Notification mocks.
 """
 from __future__ import annotations
 

@@ -10,7 +10,7 @@ state.json. Because writes are atomic-rename and reads are on-demand
 (no in-memory cache), the running bot always sees fresh state on each
 callback / command.
 
-See SPEC.md > Telegram commands.
+See docs/SPEC.md > Telegram commands.
 """
 from __future__ import annotations
 

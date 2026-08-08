@@ -4,7 +4,7 @@ This module does NOT load .env. App startup code calls `dotenv.load_dotenv()`
 once before `resolve_telegram_secrets()` is used. Keeping config parsing
 pure makes it trivial to test.
 
-See SPEC.md > Config schema for the canonical shape.
+See docs/SPEC.md > Config schema for the canonical shape.
 """
 from __future__ import annotations
 

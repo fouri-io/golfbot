@@ -18,7 +18,8 @@ decide:
     `min_players` for that date's provider queries
   - Annotate matches with the roster for the digest
 
-See SPEC.md (when updated for availability).
+See docs/SPEC.md (still pending an availability section — the weekly-pattern
+model is recorded in docs/decisions/0004-availability-weekly-pattern.md).
 """
 from __future__ import annotations
 

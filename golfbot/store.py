@@ -8,7 +8,7 @@ We operate at the dict level here; conversion to/from dataclasses
 serialized as ISO 8601 strings via the JSON `default` hook; callers parse
 them back to typed objects when needed.
 
-See SPEC.md > Data model (flat files).
+See docs/SPEC.md > Data model (flat files).
 """
 from __future__ import annotations
 

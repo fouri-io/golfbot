@@ -1,11 +1,12 @@
 # golfbot
 
 Austin golf tee-time watcher. Polls public booking systems (GolfNow API,
-GolfATX/WebTrac scraper) for desirable tee times and notifies a small group
-via Telegram. The group votes inline; the admin books manually outside the
-bot.
+GolfATX/WebTrac scraper) and pings a small Telegram group **only when an
+all-star course opens at a premium weekday time** (a "Gold Star"). Pure
+scanner — the group coordinates and books offline.
 
-See [SPEC.md](SPEC.md) for the full design.
+See [docs/SPEC.md](docs/SPEC.md) for the full design, and
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how the code is wired.
 
 ## Status
 
@@ -13,8 +14,10 @@ See [SPEC.md](SPEC.md) for the full design.
 - **P2a** ✅ GolfNow provider
 - **P2b** ✅ GolfATX/WebTrac provider (via `curl_cffi` for Cloudflare bypass)
 - **P3** ✅ Scheduled scans + Telegram digest notifications
+- **v2** 🚧 Gold Star pivot — scanner-only; retire voting/availability/booking
+  ([ADR 0006](docs/decisions/0006-gold-star-pivot.md), specced, implementing in slices)
 
-Next: per-member availability layer + hammer windows around release times.
+Next: v2 refactor slices 1–5 (see [SPEC.md](docs/SPEC.md#implementation-slices-v2-refactor)).
 
 ## Setup
 
@@ -152,4 +155,13 @@ pytest tests/test_pipeline.py -v
 
 ## Layout
 
-See SPEC.md > Repo layout. Runtime state lives in `./data/` (gitignored).
+| Path | Contents |
+|---|---|
+| `golfbot/` | Source; `providers/` holds one module per booking system |
+| `tests/` | Test suite; `fixtures/` holds recorded provider responses |
+| `docs/` | [SPEC](docs/SPEC.md), [ARCHITECTURE](docs/ARCHITECTURE.md), [decisions/](docs/decisions/) |
+| `rules/` | Coding standards ([python](rules/python.md), [telegram-ux](rules/telegram-ux.md), [testing](rules/testing.md)) |
+| `skills/` | Reusable workflows, also exposed to Claude Code via `.claude/skills` |
+| `data/` | Runtime state — gitignored and **not backed up** |
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the module graph.

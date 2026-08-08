@@ -1,7 +1,7 @@
 """Domain dataclasses: TeeTimeSlot, Vote, Booking.
 
 These mirror the on-disk shape in state.json / bookings.jsonl
-(see SPEC.md > Data model). Each class has `from_dict` / `to_dict` so the
+(see docs/SPEC.md > Data model). Each class has `from_dict` / `to_dict` so the
 store layer stays plain-JSON-only and conversion is explicit at the seam.
 """
 from __future__ import annotations

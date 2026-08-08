@@ -4,7 +4,7 @@ Builds a TeeTimeSlot from CLI args, upserts it into state.json, sends the
 initial Telegram notification, and persists the message_id. The running
 `golfbot run` process serves any button taps that follow.
 
-See SPEC.md > Phasing > P1.
+See docs/SPEC.md > Phasing > P1.
 """
 from __future__ import annotations
 

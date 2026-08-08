@@ -5,7 +5,7 @@ implements `Provider.fetch_slots(...)` returning a normalized `RawSlot`
 list. The pipeline doesn't know which provider produced what; it only
 sees `RawSlot`s.
 
-See SPEC.md > providers (P2+).
+See docs/SPEC.md > providers (P2+).
 """
 from __future__ import annotations
 

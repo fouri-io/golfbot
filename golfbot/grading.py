@@ -12,7 +12,7 @@ Both time windows are checked **inclusive** on both ends: a slot at exactly
 the window boundary counts as inside. The "ideal" window is assumed to fit
 within "acceptable" (validated in config).
 
-See SPEC.md > Grading.
+See docs/SPEC.md > Grading.
 """
 from __future__ import annotations
 
