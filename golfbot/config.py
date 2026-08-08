@@ -4,14 +4,19 @@ This module does NOT load .env. App startup code calls `dotenv.load_dotenv()`
 once before `resolve_telegram_secrets()` is used. Keeping config parsing
 pure makes it trivial to test.
 
-See docs/SPEC.md > Config schema for the canonical shape.
+See docs/SPEC.md > Config schema (v2) for the canonical shape.
+
+v2 (Gold Star pivot): the quality bar is a single `premium_window` plus a
+per-course `all_star` flag. The v1 two-axis grading config (`time_windows`,
+`grading`, course `tier`) is gone from the file format — see
+docs/decisions/0006-gold-star-pivot.md.
 """
 from __future__ import annotations
 
 import os
 from datetime import time
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
@@ -35,7 +40,22 @@ class TimeWindow(BaseModel):
         return self
 
 
+# --------------------------------------------------------------------------- #
+# v1 compatibility shims — TEMPORARY                                          #
+#                                                                             #
+# `TimeWindows` and `Grading` are no longer parsed from config.yaml. They      #
+# survive only so the not-yet-rewritten consumers (pipeline.filter_and_grade,  #
+# grading.py, notifier.render_status, the scrape CLI) keep working during the  #
+# v2 refactor. Slice 2 replaces those consumers with the Gold Star rule and    #
+# both of these classes — plus the `Config.time_windows` / `Config.grading` /  #
+# `Course.tier` properties below — get deleted.                                #
+#                                                                             #
+# Do not add new readers of these.                                            #
+# --------------------------------------------------------------------------- #
+
+
 class TimeWindows(BaseModel):
+    """v1 only. Superseded by `Config.premium_window`."""
     ideal: TimeWindow
     acceptable: TimeWindow
 
@@ -49,13 +69,16 @@ class TimeWindows(BaseModel):
         return self
 
 
+class Grading(BaseModel):
+    """v1 only. v2 has no grades — the premium window is the whole bar."""
+    notify_min_grade: Grade
+
+
 class Search(BaseModel):
     horizon_days: int = Field(ge=1, le=30)
     start_offset_days: int = Field(ge=0, le=30)
     days_of_week: list[DayOfWeek]
     holes: Literal[9, 18]
-    default_players: int = Field(ge=1, le=4)
-    expanded_players: int = Field(ge=1, le=4)
 
 
 ProviderName = Literal["golfnow", "golfatx"]
@@ -64,14 +87,27 @@ ProviderName = Literal["golfnow", "golfatx"]
 class Course(BaseModel):
     key: str
     display: str
-    tier: Literal[1, 2, 3]
     provider: ProviderName
     provider_id: str | int   # opaque per-provider identifier (int facilityId for GolfNow,
                              # WebTrac code string for GolfATX, "TBD" placeholder allowed)
+    # Only all-star courses can fire a Gold Star alert. Every configured
+    # course is still scanned so /full shows the complete picture.
+    all_star: bool = False
+
+    @property
+    def tier(self) -> int:
+        """v1 compat shim — see the block comment above. Deleted in Slice 2."""
+        return 1 if self.all_star else 2
 
 
-class Grading(BaseModel):
-    notify_min_grade: Grade
+class Alerts(BaseModel):
+    """Gold Star alert copy. Headlines are picked at random per alert.
+
+    A headline may contain `{name}`, substituted with a random roster member.
+    An empty or missing pool falls back to a single built-in default at render
+    time (see docs/SPEC.md > Snark).
+    """
+    headlines: list[str] = Field(default_factory=list)
 
 
 class ActiveWindow(BaseModel):
@@ -110,9 +146,8 @@ class Member(BaseModel):
 class Group(BaseModel):
     admin: str
     members: list[Member] = Field(min_length=1)
-    # When True: skip dates entirely when admin is out.
-    # When False (default): scan any date where ≥1 registered member is available,
-    # and the scanner uses that count as min_players for the search.
+    # Availability-layer flag. Slice 3 deletes the availability layer and this
+    # field with it; kept here so `availability.py` still loads until then.
     admin_required: bool = False
 
     @model_validator(mode="after")
@@ -141,9 +176,11 @@ class WeatherConfig(BaseModel):
 class Config(BaseModel):
     timezone: str
     search: Search
-    time_windows: TimeWindows
+    # The single quality bar: a weekday slot at an all-star course inside this
+    # window with >=1 open spot is a Gold Star.
+    premium_window: TimeWindow
     courses: list[Course] = Field(min_length=1)
-    grading: Grading
+    alerts: Alerts = Field(default_factory=Alerts)
     polling: Polling
     group: Group
     telegram: Telegram
@@ -166,12 +203,77 @@ class Config(BaseModel):
             raise ValueError(f"duplicate course keys: {sorted(dupes)}")
         return self
 
+    @model_validator(mode="after")
+    def _at_least_one_all_star(self) -> Config:
+        if not any(c.all_star for c in self.courses):
+            raise ValueError(
+                "no course has all_star: true — the bot could never alert. "
+                "Mark at least one course all_star."
+            )
+        return self
+
     @property
     def tz(self) -> ZoneInfo:
         return ZoneInfo(self.timezone)
 
     def course_by_key(self, key: str) -> Course | None:
         return next((c for c in self.courses if c.key == key), None)
+
+    # ----- v1 compat shims — see the block comment above. Deleted in Slice 2.
+
+    @property
+    def time_windows(self) -> TimeWindows:
+        """Collapses to the premium window on both axes, so v1 grading code
+        treats "in the premium window" as the only passing bucket."""
+        return TimeWindows(ideal=self.premium_window, acceptable=self.premium_window)
+
+    @property
+    def grading(self) -> Grading:
+        return Grading(notify_min_grade="B")
+
+
+# Keys that existed in v1 and are gone in v2. Mapping value is the replacement
+# (or None if the concept was dropped outright).
+_REMOVED_TOP_LEVEL: dict[str, str | None] = {
+    "time_windows": "premium_window",
+    "grading": None,
+}
+_REMOVED_SEARCH: dict[str, str | None] = {
+    "default_players": None,
+    "expanded_players": None,
+}
+_REMOVED_COURSE: dict[str, str | None] = {
+    "tier": "all_star",
+}
+
+
+def _reject_v1_keys(raw: dict[str, Any], path: Path) -> None:
+    """Fail loudly on a v1 config rather than silently ignoring dead keys.
+
+    pydantic ignores unknown keys by default, so without this a stale
+    config.yaml would load fine and quietly behave nothing like it reads.
+    """
+    found: list[str] = []
+    for key, replacement in _REMOVED_TOP_LEVEL.items():
+        if key in raw:
+            found.append(f"{key}" + (f" (use {replacement})" if replacement else ""))
+    search = raw.get("search")
+    if isinstance(search, dict):
+        for key, replacement in _REMOVED_SEARCH.items():
+            if key in search:
+                found.append(f"search.{key}" + (f" (use {replacement})" if replacement else ""))
+    courses = raw.get("courses")
+    if isinstance(courses, list):
+        for key, replacement in _REMOVED_COURSE.items():
+            if any(isinstance(c, dict) and key in c for c in courses):
+                found.append(
+                    f"courses[].{key}" + (f" (use {replacement})" if replacement else "")
+                )
+    if found:
+        raise ValueError(
+            f"{path} uses the v1 schema. Remove these keys: {', '.join(found)}. "
+            "See docs/SPEC.md > Config schema (v2)."
+        )
 
 
 def load(path: Path | str = "config.yaml") -> Config:
@@ -181,6 +283,7 @@ def load(path: Path | str = "config.yaml") -> Config:
         raw = yaml.safe_load(f)
     if not isinstance(raw, dict):
         raise ValueError(f"{path} did not parse to a mapping (got {type(raw).__name__})")
+    _reject_v1_keys(raw, path)
     return Config.model_validate(raw)
 
 

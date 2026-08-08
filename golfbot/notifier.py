@@ -131,8 +131,7 @@ def render_status(state: dict, cfg: Config, today: date) -> str:
     )
 
     days = ", ".join(d.capitalize()[:3] for d in cfg.search.days_of_week)
-    ideal = cfg.time_windows.ideal
-    accept = cfg.time_windows.acceptable
+    premium = cfg.premium_window
 
     from golfbot import bookings as bookings_mod
     bookings = bookings_mod.load_bookings(state)
@@ -152,8 +151,7 @@ def render_status(state: dict, cfg: Config, today: date) -> str:
         f"📡 Watching: {course_names}",
         f"🗓  Horizon: {_fmt_date(start)} → {_fmt_date(end)} ({cfg.search.horizon_days} days)",
         f"🎯 Days: {days}",
-        f"⏰ Ideal: {_fmt_time(ideal.start)}–{_fmt_time(ideal.end)}"
-        f" · Acceptable: {_fmt_time(accept.start)}–{_fmt_time(accept.end)}",
+        f"⏰ Premium: {_fmt_time(premium.start)}–{_fmt_time(premium.end)}",
         f"📌 Bookings: {booking_summary}",
     ]
     aw = cfg.polling.active_window

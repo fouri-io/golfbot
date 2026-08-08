@@ -14,6 +14,20 @@ from golfbot.config import (
     resolve_telegram_secrets,
 )
 
+V1_ONLY_CONFIG = """\
+timezone: America/Chicago
+search: {horizon_days: 7, start_offset_days: 1, days_of_week: [monday], holes: 18}
+time_windows:
+  ideal:      {start: "07:30", end: "08:00"}
+  acceptable: {start: "07:00", end: "09:00"}
+courses:
+  - {key: roy_kizer, display: "Roy Kizer", tier: 1, provider: golfatx, provider_id: 2}
+grading: {notify_min_grade: B}
+polling: {default_interval_minutes: 60, jitter_minutes: 5}
+group: {admin: Colby, members: [{name: Colby, telegram_user_id: 1}]}
+telegram: {bot_token_env: T, chat_id_env: C}
+"""
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SAMPLE_CONFIG = REPO_ROOT / "config.yaml"
 
@@ -36,17 +50,99 @@ def test_load_repo_config():
     assert cfg.search.days_of_week == [
         "monday", "tuesday", "wednesday", "thursday", "friday",
     ]
-    assert cfg.grading.notify_min_grade == "B"
-    assert cfg.time_windows.ideal.start == time(7, 30)
-    assert cfg.time_windows.acceptable.end == time(9, 0)
+    assert cfg.premium_window.start == time(7, 20)
+    assert cfg.premium_window.end == time(8, 0)
 
 
 def test_course_by_key():
     cfg = load(SAMPLE_CONFIG)
     rk = cfg.course_by_key("roy_kizer")
     assert rk is not None
-    assert rk.tier == 1
     assert cfg.course_by_key("nonexistent") is None
+
+
+# ---------- v2: all_star ----------
+
+
+def test_all_star_set_matches_spec():
+    """SPEC v2 > All-star set: exactly these four can fire an alert."""
+    cfg = load(SAMPLE_CONFIG)
+    assert {c.key for c in cfg.courses if c.all_star} == {
+        "jimmy_clay", "roy_kizer", "riverside", "grey_rock_golf_club",
+    }
+
+
+def test_non_all_star_courses_are_still_scanned():
+    """Scan all, alert on four — non-all-star courses stay configured."""
+    cfg = load(SAMPLE_CONFIG)
+    assert {c.key for c in cfg.courses if not c.all_star} >= {
+        "morris_williams", "lions",
+    }
+
+
+def test_all_star_defaults_to_false():
+    cfg = load(SAMPLE_CONFIG)
+    lions = cfg.course_by_key("lions")
+    assert lions is not None and lions.all_star is False
+
+
+def test_rejects_config_with_no_all_star_course(tmp_path):
+    bad = SAMPLE_CONFIG.read_text().replace("all_star: true", "all_star: false")
+    p = tmp_path / "config.yaml"
+    p.write_text(bad)
+    with pytest.raises(ValueError, match="no course has all_star"):
+        load(p)
+
+
+# ---------- v2: alerts.headlines ----------
+
+
+def test_headlines_load_from_config():
+    cfg = load(SAMPLE_CONFIG)
+    assert len(cfg.alerts.headlines) >= 10
+    assert any("{name}" in h for h in cfg.alerts.headlines)
+
+
+def test_alerts_block_is_optional(tmp_path):
+    """A missing pool is legal; the renderer falls back to a built-in default."""
+    text = SAMPLE_CONFIG.read_text()
+    head, _, _ = text.partition("\nalerts:")
+    _, _, tail = text.partition("\npolling:")
+    p = tmp_path / "config.yaml"
+    p.write_text(head + "\npolling:" + tail)
+    cfg = load(p)
+    assert cfg.alerts.headlines == []
+
+
+# ---------- v2: v1 schema rejection ----------
+
+
+def test_rejects_v1_schema_keys(tmp_path):
+    p = tmp_path / "config.yaml"
+    p.write_text(V1_ONLY_CONFIG)
+    with pytest.raises(ValueError, match="uses the v1 schema"):
+        load(p)
+
+
+def test_v1_rejection_names_every_removed_key(tmp_path):
+    p = tmp_path / "config.yaml"
+    p.write_text(V1_ONLY_CONFIG)
+    with pytest.raises(ValueError) as exc:
+        load(p)
+    msg = str(exc.value)
+    assert "time_windows" in msg and "premium_window" in msg
+    assert "grading" in msg
+    assert "courses[].tier" in msg and "all_star" in msg
+
+
+def test_rejects_removed_search_player_keys(tmp_path):
+    bad = SAMPLE_CONFIG.read_text().replace(
+        "  holes: 18", "  holes: 18\n  default_players: 3\n  expanded_players: 2"
+    )
+    p = tmp_path / "config.yaml"
+    p.write_text(bad)
+    with pytest.raises(ValueError, match=r"search\.default_players"):
+        load(p)
 
 
 # ---------- TimeWindow / TimeWindows ----------

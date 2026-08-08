@@ -100,12 +100,14 @@ def test_filter_keeps_grade_B_tier2_ideal(cfg):
     assert matches[0].grade == "B"
 
 
-def test_filter_keeps_grade_B_tier1_acceptable(cfg):
-    # Roy Kizer tier-1 at 8:30 (acceptable, not ideal) → B
+def test_filter_drops_all_star_outside_premium_window(cfg):
+    """v2 has a single premium window — there is no wider 'acceptable' band.
+
+    Roy Kizer at 8:30 qualified under v1 (tier-1, acceptable → B). With
+    `premium_window` as the only bar it is now dropped, all-star or not.
+    """
     slots = [_slot("roy_kizer", date(2026, 5, 18), time(8, 30))]
-    matches = filter_and_grade(slots, cfg)
-    assert len(matches) == 1
-    assert matches[0].grade == "B"
+    assert filter_and_grade(slots, cfg) == []
 
 
 # ---------- apply_policy_b ----------

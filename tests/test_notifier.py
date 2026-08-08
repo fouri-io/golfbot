@@ -200,8 +200,7 @@ def test_render_status_default(monkeypatch):
     assert "Grey Rock" in out
     assert "Sat May 16 → Fri May 22 (7 days)" in out
     assert "🎯 Days: Mon, Tue, Wed, Thu, Fri" in out
-    assert "⏰ Ideal: 7:30 AM–8:00 AM" in out
-    assert "Acceptable: 7:00 AM–9:00 AM" in out
+    assert "⏰ Premium: 7:20 AM–8:00 AM" in out
     assert "📌 Bookings: — (none)" in out
     assert "🔔 Notifications: ON" in out
 
